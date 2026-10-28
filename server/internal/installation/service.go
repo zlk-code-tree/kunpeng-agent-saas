@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"gin-dify-saas/server/internal/billing"
 	"gin-dify-saas/server/internal/platform/ids"
 
 	"github.com/jackc/pgx/v5"
@@ -35,10 +36,12 @@ type SetupInput struct {
 	AdminPassword string `json:"adminPassword" binding:"required,min=8,max=128"`
 }
 
+// NewService 创建平台首次安装服务，并保留进程配置的单/多租户模式。
 func NewService(db *pgxpool.Pool, configuredMode string) *Service {
 	return &Service{db: db, configuredMode: configuredMode}
 }
 
+// Status 返回安装状态，并验证运行配置模式与数据库持久化模式一致。
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	var status Status
 	err := s.db.QueryRow(ctx, `
@@ -59,6 +62,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	return status, nil
 }
 
+// Setup 原子完成首次安装，创建默认租户、平台管理员、计费账户和预置智能体。
 func (s *Service) Setup(ctx context.Context, input SetupInput) (Status, error) {
 	status, err := s.Status(ctx)
 	if err != nil {
@@ -92,25 +96,20 @@ func (s *Service) Setup(ctx context.Context, input SetupInput) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	billingAccountID, err := ids.New()
-	if err != nil {
-		return Status{}, err
-	}
-	walletID, err := ids.New()
-	if err != nil {
-		return Status{}, err
-	}
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(input.AdminPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return Status{}, fmt.Errorf("hash password: %w", err)
 	}
 
+	// 安装是一次性聚合操作：默认租户、平台管理员、成员关系、计费和预置智能体必须同时存在或同时不存在。
+	// SERIALIZABLE 隔离级别也能安全处理多个并发安装请求。
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return Status{}, fmt.Errorf("begin installation: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
+	// 事务外的 Status 只是快速判断，不能阻止并发竞争，因此进入事务后必须再次检查安装锁。
 	var count int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM installation_settings`).Scan(&count); err != nil {
 		return Status{}, fmt.Errorf("check installation lock: %w", err)
@@ -125,8 +124,8 @@ func (s *Service) Setup(ctx context.Context, input SetupInput) (Status, error) {
 		return Status{}, fmt.Errorf("create default tenant: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO users (id, username, password_hash, display_name, status)
-		VALUES ($1, $2, $3, $4, 'active')
+		INSERT INTO users (id, username, password_hash, display_name, status, is_platform_admin)
+		VALUES ($1, $2, $3, $4, 'active', TRUE)
 	`, userID, strings.TrimSpace(input.AdminUsername), string(passwordHash), strings.TrimSpace(input.AdminName)); err != nil {
 		return Status{}, fmt.Errorf("create administrator: %w", err)
 	}
@@ -139,20 +138,12 @@ func (s *Service) Setup(ctx context.Context, input SetupInput) (Status, error) {
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO installation_settings
 			(id, mode, platform_name, default_tenant_id, schema_version)
-		VALUES ($1, $2, $3, $4, 2)
+		VALUES ($1, $2, $3, $4, 5)
 	`, installationID, s.configuredMode, strings.TrimSpace(input.PlatformName), tenantID); err != nil {
 		return Status{}, fmt.Errorf("save installation settings: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO billing_accounts (id, tenant_id, subject_type, subject_id, status)
-		VALUES ($1, $2, 'tenant', $2, 'active')
-	`, billingAccountID, tenantID); err != nil {
+	if _, err := billing.ProvisionAccount(ctx, tx, tenantID, "tenant", tenantID); err != nil {
 		return Status{}, fmt.Errorf("create default billing account: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO wallet_accounts (id, billing_account_id) VALUES ($1, $2)
-	`, walletID, billingAccountID); err != nil {
-		return Status{}, fmt.Errorf("create default wallet: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO agent_templates (id, name, description, category, status)

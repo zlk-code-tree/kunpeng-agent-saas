@@ -1,0 +1,2088 @@
+openapi: 3.1.0
+info:
+  title: Gin Dify SaaS API
+  version: 1.0.0
+  description: |
+    Gin Dify SaaS 平台全部后端接口契约：安装初始化、认证与用户、租户与成员、智能体目录、
+    知识库、运行编排（含 SSE 事件流）、计费与对账、Dify/模型供应商集成、工具网关和运维导出。
+
+    统一响应封装：所有接口（/metrics 除外）返回 {code, message, data}。成功时 code=0、message=ok，
+    查询/操作类接口为 HTTP 200，创建类接口为 HTTP 201，业务数据放在 data 中。错误响应同样为封装体
+    （无 data 字段），code 为业务错误码：14xxx 表示客户端错误，15xxx 表示服务端错误，
+    message 为人类可读的错误说明。
+
+    认证方式：
+    - 登录用户接口：Authorization: Bearer <JWT>（登录、注册、切换租户获取）。
+    - 平台管理接口：Bearer JWT 且用户带安装级 platform_admin 标记，权限高于租户 owner/admin。
+    - 工具调用接口 /api/v1/internal/tools/invoke：Authorization: Tool <HMAC 票据>，非 Bearer JWT，
+      票据由 /api/v1/runs/{id}/tool-tickets 签发，5 分钟有效且绑定具体运行身份。
+
+    公共请求头（按需）：Authorization（鉴权）、Idempotency-Key（POST /api/v1/runs 幂等键）、
+    Last-Event-ID（SSE 断线续传，值为事件序号）、X-Request-ID（全链路追踪，服务端在响应头回传）。
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+tags:
+  - name: 系统探针
+    description: 无鉴权的进程健康与指标探针
+  - name: 安装
+    description: 平台一次性安装与能力查询
+  - name: 认证与用户
+    description: 登录、注册、令牌与当前用户信息
+  - name: 租户与成员
+    description: 租户空间、成员、邀请与所有权管理
+  - name: 智能体
+    description: 预置智能体目录
+  - name: 知识库
+    description: 知识库与文档管理
+  - name: 运行
+    description: 智能体运行创建、查询、取消与事件流
+  - name: 计费
+    description: 钱包、套餐、订阅、流水与成本
+  - name: 平台集成
+    description: Dify 实例、模型供应商与模型路由（平台管理员）
+  - name: 工具网关
+    description: 受控工具目录、授权、票据与调用
+  - name: 运维
+    description: 租户数据导出等运维操作（平台管理员）
+paths:
+  /healthz:
+    get:
+      tags: [系统探针]
+      summary: 存活探针，确认 HTTP 进程仍在运行
+      description: '进程级存活检查，不探测数据库、Redis 等外部依赖，供容器编排的 liveness 探针使用。无需鉴权。成功时 data.status 固定为 ok。'
+      security: []
+      responses:
+        '200':
+          description: '进程存活，code=0'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/StatusMessage' } } }
+  /readyz:
+    get:
+      tags: [系统探针]
+      summary: 就绪探针，确认数据库与 Redis 依赖均可用
+      description: '以 2 秒超时 Ping 数据库和 Redis，核心依赖全部可用才返回就绪，供容器编排的 readiness 探针使用。无需鉴权。成功时 data.status 固定为 ready。错误：503 code=15020 数据库未就绪；15021 Redis 未就绪。'
+      security: []
+      responses:
+        '200':
+          description: '依赖就绪，code=0'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/StatusMessage' } } }
+        '503':
+          description: '核心依赖不可用。code=15020 数据库未就绪；15021 Redis 未就绪'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+  /metrics:
+    get:
+      tags: [系统探针]
+      summary: 以 Prometheus 文本格式暴露当前进程采集的运行指标
+      description: '返回当前进程采集的 HTTP 请求量、在途请求、延迟等 Prometheus 指标（text/plain 原始文本，非统一响应封装）。指标只属于当前进程，多副本部署需逐实例抓取后聚合。无需鉴权。'
+      security: []
+      responses:
+        '200':
+          description: 'Prometheus 文本格式指标'
+          content:
+            text/plain:
+              schema: { type: string }
+  /api/v1/install/status:
+    get:
+      tags: [安装]
+      summary: 查询平台安装状态与当前运行模式
+      description: '返回平台是否已完成首次安装、单/多租户模式（single 或 multi）以及安装 ID、默认租户 ID（未安装时二者不返回）。公开接口，无需鉴权。错误：500 code=15001 加载安装状态失败，或运行配置模式与数据库已安装模式不一致。'
+      security: []
+      responses:
+        '200':
+          description: '安装状态查询成功，code=0'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/InstallationStatus' } } }
+        '500':
+          description: 'code=15001 加载安装状态失败或运行模式与已安装模式不一致'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+  /api/v1/install:
+    post:
+      tags: [安装]
+      summary: 执行一次性平台初始化，创建默认租户、平台管理员、计费账户与预置智能体
+      description: '整个平台只允许执行一次，成功后返回安装状态。初始化在单个事务内原子创建默认租户、平台管理员（owner）、成员关系、计费账户（含期初赠送流水与免费订阅）和预置智能体。公开接口，无需鉴权，应在任何用户注册前调用。错误：400 code=14001 参数校验失败；409 code=14009 平台已安装；500 code=15002 初始化失败。'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetupInput' }
+      responses:
+        '201':
+          description: '初始化成功，code=0，data 为安装状态'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/InstallationStatus' } } }
+        '400':
+          description: 'code=14001 请求参数缺失或不满足长度约束'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '409':
+          description: 'code=14009 平台已安装，不允许重复初始化'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15002 初始化失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+  /api/v1/system/capabilities:
+    get:
+      tags: [安装]
+      summary: 查询平台能力开关，供前端决定开放哪些功能
+      description: '根据安装模式返回 features 布尔开关：tenantCreation、tenantSwitching（仅多租户模式为 true）、billing、payment、enterpriseDify、modelRouting、toolGateway、providerCosting、tenantExport。公开接口，无需鉴权。错误：500 code=15001 加载能力配置失败。'
+      security: []
+      responses:
+        '200':
+          description: '能力查询成功，code=0'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/Capabilities' } } }
+        '500':
+          description: 'code=15001 加载能力配置失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+  /api/v1/auth/login:
+    post:
+      tags: [认证与用户]
+      summary: 使用用户名密码登录并签发访问令牌
+      description: '校验用户名和密码后签发 JWT（accessToken），后续请求以 Authorization: Bearer <accessToken> 调用受保护接口。多租户用户首次登录优先绑定默认租户，否则绑定最早加入的租户；切换租户会重新签发令牌。公开接口，无需鉴权。错误：400 code=14001 缺少用户名或密码；401 code=14012 用户名或密码错误；500 code=15010 登录失败。'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginInput' }
+      responses:
+        '200':
+          description: '登录成功，code=0，data 为访问令牌'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/LoginResult' } } }
+        '400':
+          description: 'code=14001 缺少用户名或密码'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401':
+          description: 'code=14012 用户名或密码错误'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15010 登录失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+  /api/v1/auth/register:
+    post:
+      tags: [认证与用户]
+      summary: 注册新用户并自动创建个人空间、成员关系与计费账户
+      description: '仅在多租户（multi）模式开放注册。注册在单个事务内原子创建用户、个人空间租户、owner 成员关系和计费账户，成功后直接返回可用令牌与新租户 ID。用户名会转小写并去除首尾空白。公开接口，无需鉴权。错误：400 code=14600 参数校验失败；409 code=14609 当前部署为单租户模式不允许注册；409 code=14610 用户名已存在；500 code=15600 注册失败。'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterInput' }
+      responses:
+        '201':
+          description: '注册成功，code=0，data 为访问令牌与新租户 ID'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/RegisterResult' } } }
+        '400':
+          description: 'code=14600 注册参数缺失或不满足长度约束'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '409':
+          description: 'code=14609 单租户模式不允许注册；14610 用户名已存在'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15600 注册失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+  /api/v1/internal/tools/invoke:
+    post:
+      tags: [工具网关]
+      summary: 持运行绑定的签名票据调用受控工具（HTTP 或 MCP）
+      description: |
+        智能体运行时专用接口，不使用普通用户 JWT。鉴权头格式为 Authorization: Tool <ticket>，
+        其中 ticket 是由 /api/v1/runs/{id}/tool-tickets 签发的 HMAC-SHA256 签名票据，5 分钟有效。
+        租户、用户、运行和工具身份全部取自签名票据，请求体只能携带业务参数，无法把调用切换到其他租户或其他运行。
+        网关在真正调用前会依据数据库实时复核：运行状态（dispatching/running）、租户工具授权、智能体版本白名单、
+        单次运行调用上限（失败调用也计入）、端点安全策略（生产环境要求 HTTPS 且禁止内网/回环/链路本地地址），
+        并对每次调用落审计记录。mcp_http 协议以 JSON-RPC tools/call 封装请求，http_json 直接发送 arguments。
+        错误：401 code=14805 缺少票据或请求体非法；403 code=14804 票据无效/过期、运行状态不允许、
+        未获授权或已超出单次运行调用上限；502 code=15802 上游工具调用失败（网络错误、超时、非 2xx 或响应体超限）。
+      security:
+        - toolTicket: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InvokeInput' }
+      responses:
+        '200':
+          description: '调用成功，code=0，data 为工具返回的 JSON 对象（非 JSON 响应包装为 {content: 原始文本}）'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: object, additionalProperties: true } } }
+        '401':
+          description: 'code=14805 缺少 Tool 票据或请求体不是合法 JSON'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '403':
+          description: 'code=14804 票据无效或已过期、运行状态不允许、租户/智能体未获授权或超出调用上限'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '502':
+          description: 'code=15802 上游工具调用失败（网络错误、超时、非 2xx 响应或响应体超过 maxResponseBytes）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+  /api/v1/auth/logout:
+    post:
+      tags: [认证与用户]
+      summary: 退出登录
+      description: '当前为无状态 JWT，服务端不做令牌吊销，退出成功后由客户端删除本地令牌。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '退出成功，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/auth/codes:
+    get:
+      tags: [认证与用户]
+      summary: 获取当前用户的前端权限码列表
+      description: '返回控制界面访问所需的权限码：所有用户包含 agent:use、knowledge:manage，安装级平台管理员额外包含 platform:manage。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为权限码字符串数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { type: string } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/user/info:
+    get:
+      tags: [认证与用户]
+      summary: 获取当前登录用户的资料与实时角色
+      description: '返回前端所需的用户资料和角色列表。角色以中间件实时校验的当前租户成员角色为准（首位），平台管理员标记追加在后，租户内权限规则不因此改变。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为当前用户资料'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/UserInfo' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15011 加载用户资料失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/agents:
+    get:
+      tags: [智能体]
+      summary: 列出当前租户可用的预置智能体及最新已发布版本
+      description: '智能体模板全局共享，启用状态和 Dify 绑定按租户隔离。configured 表示该版本已绑定可用的 Dify 应用（租户专属绑定优先于共享兜底绑定，与执行 Worker 的路由规则一致），enabled 反映租户级启用开关。parameterSchema 为该版本的参数 JSON Schema。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为智能体数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/AgentItem' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15100 加载智能体列表失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/billing/account:
+    get:
+      tags: [计费]
+      summary: 查询当前计费主体的钱包余额
+      description: '按当前租户类型解析实际承担费用的计费账户：个人空间返回创建者的用户钱包，企业空间返回租户共享钱包。金额字段均为十进制字符串，available = balance - frozenAmount。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为计费账户'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/Account' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: 'code=14704 计费账户不存在'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15700 加载计费账户失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/billing/plans:
+    get:
+      tags: [计费]
+      summary: 列出当前租户可购买或使用的套餐版本
+      description: '返回适用于当前租户类型（personal 或 organization，audience=all 通用）且当前生效的最新套餐版本，按价格升序。benefits 为该版本的权益配置。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为套餐数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/Plan' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15701 加载套餐失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/billing/subscription:
+    get:
+      tags: [计费]
+      summary: 查询当前有效订阅及本周期权益使用情况
+      description: '返回当前计费主体最近一条有效订阅（trialing/active/past_due）及其权益计数器：limit 为周期限额，used 为已用量，reserved 为运行预占量，periodEnd 为周期结束时间。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为订阅及权益'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/Subscription' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: 'code=14704 无有效订阅'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15703 加载订阅失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/billing/ledger:
+    get:
+      tags: [计费]
+      summary: 分页查询当前计费主体的钱包流水
+      description: '按时间倒序返回钱包流水（期初赠送、预占、释放、消费、人工调账），流水是余额变更的审计依据，不可修改。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          description: '返回条数，默认 50，有效范围 1-100，超出范围回落为 50'
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为流水数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/LedgerEntry' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15704 加载钱包流水失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/tenants:
+    get:
+      tags: [租户与成员]
+      summary: 列出当前用户加入的全部有效租户
+      description: '返回用户所有活跃成员关系对应的租户，个人空间排在前面。current=true 标记当前令牌所选择的租户。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为租户数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/TenantItem' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15600 加载租户列表失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+    post:
+      tags: [租户与成员]
+      summary: 创建新的企业租户空间
+      description: '仅多租户（multi）模式可用。创建企业空间并把创建者设为 owner，同时创建归属租户的企业共享计费账户（成员共享额度），写入 tenant.create 审计。'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TenantCreateInput' }
+      responses:
+        '201':
+          description: '创建成功，code=0，data 为新租户'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/TenantItem' } } }
+        '400':
+          description: 'code=14601 租户名称缺失或不满足长度约束'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: 'code=14609 单租户模式不允许创建租户'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15600 创建租户失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/tenants/{id}/switch:
+    post:
+      tags: [租户与成员]
+      summary: 切换当前租户并换发绑定目标租户的新访问令牌
+      description: '旧令牌不能直接授权其他租户；切换时重新校验用户、租户和成员关系后签发新令牌，后续请求须使用新令牌。目标租户须为活跃状态且用户为其活跃成员。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: '切换成功，code=0，data 为新令牌与目标租户'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SwitchResult' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: 'code=14604 目标租户不存在、已停用或当前用户不是其活跃成员'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15600 切换租户失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/tenants/{id}/members:
+    get:
+      tags: [租户与成员]
+      summary: 列出指定租户的活跃成员
+      description: '按角色优先级（owner、admin、finance、member）返回成员列表。只能查询当前令牌已切换到的租户。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为成员数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/TenantMember' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 'code=14603 路径租户与当前令牌租户不一致，需先切换到该租户'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15600 加载成员列表失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/tenants/{id}/invitations:
+    post:
+      tags: [租户与成员]
+      summary: 为已注册用户创建限时租户邀请
+      description: '仅当前租户的 owner 或 admin 可邀请，且必须先切换到该租户。目标用户须已注册且尚未加入本租户；邀请 72 小时有效。原始邀请令牌只在本次响应返回一次，数据库仅保存 SHA-256 摘要，需通过可信渠道转交被邀请人。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InviteInput' }
+      responses:
+        '201':
+          description: '邀请创建成功，code=0，data 含仅此一次返回的邀请令牌'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/Invitation' } } }
+        '400':
+          description: 'code=14604 邀请参数非法（用户名长度或 role 不在 admin/member/finance 之内）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 'code=14603 非当前租户或当前用户不是 owner/admin'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '404':
+          description: 'code=14604 目标用户名不存在'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '409':
+          description: 'code=14610 目标用户已是本租户成员或存在冲突的待处理邀请'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15600 创建邀请失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/tenant-invitations/accept:
+    post:
+      tags: [租户与成员]
+      summary: 接受属于当前用户的有效邀请并加入租户
+      description: '原子消费邀请并创建或恢复成员关系（支持重新邀请已退出用户），邀请只能被消费一次。并发重复提交由行锁保护。'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AcceptInvitationInput' }
+      responses:
+        '200':
+          description: '接受成功，code=0，data 为加入的租户'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/TenantItem' } } }
+        '400':
+          description: 'code=14606 邀请令牌缺失或长度不在 32-256 之间'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: 'code=14604 邀请不存在、已被消费或已过期'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15600 接受邀请失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/tenants/{id}/members/{userId}:
+    delete:
+      tags: [租户与成员]
+      summary: 按角色权限移除指定租户成员
+      description: '仅当前租户的 owner 或 admin 可操作，且必须先切换到该租户。规则：不能移除自己；不能移除 owner（须先转移所有权）；admin 不能移除同级 admin。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - name: userId
+          in: path
+          description: '目标成员的用户 ID'
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: '移除成功，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 'code=14603 无权限（非 owner/admin、移除自己、移除 owner 或 admin 互删）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '404':
+          description: 'code=14604 目标用户不是本租户活跃成员'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15600 移除成员失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/tenants/{id}/leave:
+    post:
+      tags: [租户与成员]
+      summary: 当前用户退出指定租户
+      description: '普通成员可自行退出；owner 必须先完成所有权转移才能退出（防止租户无所有者）。仅能退出当前令牌所在的租户。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: '退出成功，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 'code=14603 路径租户与当前令牌租户不一致，或所有者未先转移所有权'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '404':
+          description: 'code=14604 当前用户不是该租户活跃成员'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15600 退出租户失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/tenants/{id}/transfer-ownership:
+    post:
+      tags: [租户与成员]
+      summary: 将租户所有权转移给指定成员
+      description: '仅当前租户的 owner 可操作，且必须先切换到该租户。原所有者降级为 admin、目标成员升级为 owner 在同一事务内原子完成，不产生双所有者或无所有者的中间状态。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransferOwnershipInput' }
+      responses:
+        '200':
+          description: '转移成功，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '400':
+          description: 'code=14605 userId 缺失或不是合法 UUID'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 'code=14603 当前用户不是该租户 owner 或未切换到该租户'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '404':
+          description: 'code=14604 目标用户不是本租户活跃成员'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '409':
+          description: 'code=14610 转移给自己或目标成员已是 owner'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15600 转移所有权失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/knowledge-bases:
+    get:
+      tags: [知识库]
+      summary: 列出当前用户可见的知识库
+      description: '返回当前租户的共享知识库（visibility=tenant）和当前用户拥有的私有知识库（visibility=private），按创建时间倒序。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为知识库数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/KnowledgeBaseItem' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15200 加载知识库列表失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+    post:
+      tags: [知识库]
+      summary: 创建私有或租户共享知识库
+      description: '先在本地创建知识库记录（初始状态 provisioning），再尽力在租户自有或平台共享的 Dify 实例上创建同名数据集；成功后状态变为 active。Dify 实例缺失或临时不可用时本地知识库保留 provisioning 状态，不因外部集成故障丢失本地数据。'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KnowledgeBaseCreateInput' }
+      responses:
+        '201':
+          description: '创建成功，code=0，data 为知识库（status 为 provisioning 或 active）'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/KnowledgeBaseItem' } } }
+        '400':
+          description: 'code=14201 参数非法（name 长度 2-100，visibility 只能是 private 或 tenant）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15201 创建知识库失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/knowledge-bases/{id}/documents:
+    get:
+      tags: [知识库]
+      summary: 列出指定知识库的文档及索引状态
+      description: '按创建时间倒序返回文档。indexingStatus 反映 Dify 侧索引进度：waiting（待重试上传/索引）、indexing（索引中）以及后续完成状态。仅可见（私有且归属自己，或租户共享）的知识库可查询。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为文档数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/KnowledgeDocument' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15212 加载文档列表失败（知识库不存在或当前用户不可见时同样返回此错误）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+    post:
+      tags: [知识库]
+      summary: 上传文档到指定知识库
+      description: 'multipart/form-data 上传单个文件（字段名 file，不超过 50MB）。文件先落入本地对象存储（对象键带租户和知识库前缀，物理隔离）并计算 SHA-256 摘要，再尽力转发给 Dify 建立索引；Dify 上传失败时文档保持 waiting 等待重试，不拒绝已落盘的文件。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: '上传的文件内容，字段名必须为 file，单文件最大 50MB'
+      responses:
+        '201':
+          description: '上传成功，code=0，data 为文档元数据'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/KnowledgeDocument' } } }
+        '400':
+          description: 'code=14210 缺少 file 字段或文件超过 50MB；14211 无法读取上传内容'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15210 计算文件摘要失败；15211 上传失败（含知识库不存在或不可见）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/runs:
+    post:
+      tags: [运行]
+      summary: 创建一次异步智能体运行
+      description: '在单个事务内原子创建会话消息、运行记录、额度预占、初始事件（run.queued）和 Outbox 事件，返回 status=queued 的运行。conversationId 为空时自动创建新会话（标题取自 query 前 80 字），否则必须属于当前用户且状态为 active。支持幂等：携带相同 Idempotency-Key 重试返回首次创建的运行，不会重复冻结额度。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: '幂等键，按租户和用户隔离；不传时服务端生成随机键'
+          required: false
+          schema: { type: string, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunCreateInput' }
+      responses:
+        '201':
+          description: '运行创建成功，code=0，data 为运行记录'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/Run' } } }
+        '400':
+          description: 'code=14400 参数校验失败（agentVersionId 非 UUID、query 缺失或超过 20000 字符）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402':
+          description: 'code=14402 额度预占失败，钱包可用余额不足'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '409':
+          description: 'code=14403 当前计费主体不存在'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15400 创建运行失败（含智能体版本不可用、会话不可用）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/runs/{id}:
+    get:
+      tags: [运行]
+      summary: 查询一次运行的详情
+      description: '按租户和用户隔离读取运行记录，包含输入、输出（终态后填充）、错误码和错误信息。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为运行记录'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/Run' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: 'code=14404 运行不存在或不属于当前用户'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15401 加载运行失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/runs/{id}/cancel:
+    post:
+      tags: [运行]
+      summary: 提交运行取消请求
+      description: '仅登记取消请求（状态变为 cancel_requested），只对 queued/dispatching/running 的运行有效；持有租约的 Worker 负责真正停止上游 Dify，并根据是否已产生用量决定结算还是释放预占额度。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: '取消请求已受理，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: 'code=14404 运行不存在、不属于当前用户或已进入终态'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15402 取消运行失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/runs/{id}/events:
+    get:
+      tags: [运行]
+      summary: 以 SSE 流式订阅运行事件
+      description: |
+        返回 text/event-stream 事件流，每帧格式为 id: <事件序号>、event: <事件类型>、data: <RunEvent JSON>。
+        事件按序号递增推送，支持断线续传：重连时携带请求头 Last-Event-ID（值为最后收到的事件序号），
+        服务端只推送序号在其之后的事件。事件类型包括 run.queued、run.dispatch_deferred、run.started、
+        run.delta（增量文本）、run.replace（全量替换文本）、run.agent_thought、run.workflow.*（工作流节点）、
+        run.billing_review（结算异常待复核）、run.succeeded、run.failed、run.stopped。
+        run.succeeded/run.failed/run.stopped 为终态事件，推送后服务端关闭连接。
+        服务端每 500ms 轮询共享数据库，因此任意 API 副本都能推送任意 Worker 产生的事件。
+        运行不存在或不可见时连接直接结束（不返回错误体）。
+        错误：500 code=15403 当前环境不支持流式输出。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - name: Last-Event-ID
+          in: header
+          description: '断线续传起点，值为上次收到的事件序号（整数），不传则从第一条事件开始'
+          required: false
+          schema: { type: string, pattern: '^[0-9]+$' }
+      responses:
+        '200':
+          description: 'SSE 事件流，持续推送直到终态事件或客户端断开'
+          content:
+            text/event-stream:
+              schema: { type: string }
+              examples:
+                frame:
+                  summary: '单帧事件示例'
+                  value: "id: 2\nevent: run.delta\ndata: {\"sequence\":2,\"eventType\":\"run.delta\",\"payload\":{\"delta\":\"你好\"},\"createdAt\":\"2026-10-28T08:00:00Z\"}\n\n"
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: 'code=15403 流式输出不可用'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/runs/{id}/tool-tickets:
+    post:
+      tags: [运行]
+      summary: 为进行中的运行签发短期工具调用票据
+      description: '签发 5 分钟有效、绑定当前租户/用户/运行身份的 HMAC-SHA256 票据，供 /api/v1/internal/tools/invoke 使用。要求运行处于 queued/dispatching/running 状态，且租户已获该工具授权（受智能体版本白名单限制）。票据授权可能在签发后变化，因此调用接口仍会依据数据库重新鉴权。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ToolTicketInput' }
+      responses:
+        '200':
+          description: '签发成功，code=0，data.ticket 为签名票据，data.expiresAt 为过期时间'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/ToolTicket' } } }
+        '400':
+          description: 'code=14803 toolCode 缺失或长度不在 2-64 之间'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 'code=14804 运行状态不允许、工具不存在/未启用或租户/智能体版本未获授权'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/dify-instances:
+    get:
+      tags: [平台集成]
+      summary: 列出当前租户自有与平台共享的 Dify 实例
+      description: '返回租户专属实例和共享实例的连接信息与健康状态，不返回任何凭据。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为实例数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/DifyInstance' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15300 加载 Dify 实例列表失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+    post:
+      tags: [平台集成]
+      summary: 注册共享或租户独享的 Dify 实例
+      description: 'API Key 以信封加密保存，不落明文。deploymentType=shared 表示全租户可见的平台共享基础设施，dedicated 表示归属当前租户（默认）；共享基础设施不共享应用凭据或业务数据。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDifyInstanceInput' }
+      responses:
+        '201':
+          description: '创建成功，code=0，data 为实例信息（不含凭据）'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/DifyInstance' } } }
+        '400':
+          description: 'code=14300 参数校验失败（name 2-100，baseUrl 必须是合法 URL，apiKey 至少 8 字符，deploymentType 只能是 shared 或 dedicated）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15301 创建 Dify 实例失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/dify-instances/{id}/health-check:
+    post:
+      tags: [平台集成]
+      summary: 立即探测指定 Dify 实例的连通性与凭据
+      description: '调用 Dify /info 接口（带凭据）检查网络和凭据：HTTP 4xx 标记为 degraded（服务可达但配置异常），网络错误或 5xx 标记为 unavailable 并从新任务路由中排除，成功则标记 healthy 并清零连续失败计数。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: '探测完成，code=0，data.healthStatus 为 healthy/degraded/unavailable'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/DifyInstance' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '502':
+          description: 'code=15303 健康检查执行失败（实例不存在、凭据无法解密或请求构造失败时同样返回此错误）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/dify-instances/{id}/rotate-credential:
+    post:
+      tags: [平台集成]
+      summary: 轮换指定 Dify 实例的加密凭据
+      description: '原子替换凭据并递增 credential_version（可审计），同时把健康状态重置为 unknown、清零连续失败计数，由后续健康检查决定实例何时重新进入可路由状态。仅轮换租户自有实例。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RotateCredentialInput' }
+      responses:
+        '200':
+          description: '轮换成功，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '400':
+          description: 'code=14303 apiKey 缺失或少于 8 字符'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '404':
+          description: 'code=14304 实例不存在或不属于当前租户'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/dify-bindings:
+    post:
+      tags: [平台集成]
+      summary: 将智能体版本绑定到 Dify 应用
+      description: '在同一事务内把该租户同一智能体版本的旧绑定置为 replaced 并新增有效绑定，读取方始终只能看到一个租户专属绑定；平台共享的兜底绑定不受影响。执行路由优先使用租户专属绑定。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BindAppInput' }
+      responses:
+        '201':
+          description: '绑定成功，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '400':
+          description: 'code=14302 参数校验失败（agentVersionId/difyInstanceId 必须是 UUID，apiKey 至少 8 字符）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15302 绑定失败（含 Dify 实例不存在或不可见）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/model-providers:
+    get:
+      tags: [平台集成]
+      summary: 列出当前租户可用的模型供应商
+      description: '返回租户自有供应商和平台共享供应商，不返回任何凭据。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为供应商数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/ModelProvider' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15311 加载模型供应商列表失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+    post:
+      tags: [平台集成]
+      summary: 注册云端或本地模型供应商
+      description: 'code 转小写保存；shared=true 创建平台共享供应商（不归属任何租户，所有租户可用），否则归属当前租户、其他租户不可见。API Key 非空时加密保存。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateModelProvider' }
+      responses:
+        '201':
+          description: '创建成功，code=0，data 为供应商信息（不含凭据）'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/ModelProvider' } } }
+        '400':
+          description: 'code=14310 参数校验失败（code 2-64，name 2-100，providerType 为枚举值，baseUrl 必须是合法 URL）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15310 创建模型供应商失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/model-routes:
+    post:
+      tags: [平台集成]
+      summary: 为智能体版本配置模型路由
+      description: '为指定智能体版本增加一条按 priority 选择的模型路由（值越小优先级越高，缺省 100）。供应商必须是当前租户可用的活跃供应商（自有或共享）；重复创建相同路由不覆盖，返回冲突。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetModelRouteInput' }
+      responses:
+        '201':
+          description: '路由创建成功，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '400':
+          description: 'code=14312 参数校验失败（agentVersionId/providerId 必须是 UUID，model 1-128 字符，priority 1-1000）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '409':
+          description: 'code=14313 供应商不可用或相同路由已存在'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/model-providers/{id}/prices:
+    post:
+      tags: [平台集成]
+      summary: 发布不可变的模型成本价格版本
+      description: '为指定供应商的模型追加一个新的价格版本（version 自增，即时生效）。历史成本记录保留创建时的价格版本 ID，调价后仍可复现历史成本和毛利。inputPer1000/outputPer1000 为每千 Token 价格。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelPrice' }
+      responses:
+        '201':
+          description: '价格版本发布成功，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '400':
+          description: 'code=14314 参数校验失败（model 1-128 字符，inputPer1000/outputPer1000 必填，currency 最长 16 字符）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '409':
+          description: 'code=14315 供应商不存在、不可见或价格数值不是合法十进制数'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/tools:
+    get:
+      tags: [工具网关]
+      summary: 列出平台工具目录及各工具的最新有效版本
+      description: '返回工具目录与最新 active 版本的端点信息，绝不返回任何凭据。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为工具数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/Tool' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15800 加载工具列表失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+    post:
+      tags: [工具网关]
+      summary: 发布受控的 HTTP 或 MCP 工具
+      description: '创建工具目录项和首个不可变版本，调用凭据加密保存（不写入票据、不通过列表返回）。端点在入库和每次调用时都会做安全校验：必须是 http/https 合法 URL，生产环境必须为 HTTPS 且域名解析不得指向内网/回环/链路本地地址（防 SSRF）。method 缺省 POST，timeoutMs 缺省 10000，maxResponseBytes 缺省 1048576。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTool' }
+      responses:
+        '201':
+          description: '创建成功，code=0，data 为工具目录项'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/Tool' } } }
+        '400':
+          description: 'code=14800 参数校验失败（约束见 schema）；14801 端点不合法或不安全（生产要求 HTTPS 且禁止私网地址）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/tools/{id}/grants:
+    post:
+      tags: [工具网关]
+      summary: 将工具授权给指定租户并可限定智能体版本白名单
+      description: '创建或更新（Upsert）租户对工具的授权：allowedAgentVersionIds 为空表示不限制智能体版本，maxCallsPerRun 限制单次运行的调用上限（缺省 10，失败调用也计入）。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GrantInput' }
+      responses:
+        '200':
+          description: '授权成功，code=0，data.success 恒为 true'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/SuccessFlag' } } }
+        '400':
+          description: 'code=14802 参数校验失败（tenantId 必须是 UUID，allowedAgentVersionIds 元素为 UUID，maxCallsPerRun 1-1000）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15801 授权失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/billing/accounts/{id}/adjustments:
+    post:
+      tags: [计费]
+      summary: 平台管理员对计费账户人工调账
+      description: '按金额（正为加款、负为扣款）调整指定账户钱包，负向调账只能扣减未冻结额度（调账后余额不得低于冻结金额，保证运行中的预占可正常结算）。以幂等键记录操作原因和操作者，写入不可变钱包流水作为审计依据。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdjustmentInput' }
+      responses:
+        '200':
+          description: '调账成功，code=0，data 为调账后的账户余额'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/Account' } } }
+        '400':
+          description: 'code=14700 参数校验失败（amount 必填，idempotencyKey 8-128，reason 2-255）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '409':
+          description: 'code=14701 金额非法（0 或非数值）、账户不存在/非活跃，或调账后余额低于冻结金额'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '500':
+          description: 'code=15702 调账失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/costs/summary:
+    get:
+      tags: [计费]
+      summary: 按成本类型、供应商和模型汇总上游成本
+      description: '使用不可变价格版本记录的供应商成本汇总，区间为 [from, to)（按记录创建时间过滤）。from 缺省为当前时间前一个月，to 缺省为当前时间；传入非 RFC3339 时间时忽略该参数。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          description: '起始时间（含），RFC3339 格式，缺省为当前时间前一个月'
+          required: false
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: '结束时间（不含），RFC3339 格式，缺省为当前时间'
+          required: false
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: '查询成功，code=0，data 为成本汇总数组'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { type: array, items: { $ref: '#/components/schemas/CostSummaryItem' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15710 加载成本汇总失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/reconciliation:
+    post:
+      tags: [计费]
+      summary: 执行一次只读账务对账扫描
+      description: '扫描运行、用量、预占和成本之间的不一致并持久化对账报告：成功运行缺用量、预占待用量、预占待人工复核、有用量缺成本四类计数。对账只识别异常并生成报告，不猜测缺失用量、不自动移动资金，避免错误数据触发不可逆账务调整。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: '对账完成，code=0，data 为对账报告'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/ReconciliationReport' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15711 对账失败'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+  /api/v1/admin/tenants/{id}/export:
+    post:
+      tags: [运维]
+      summary: 导出租户迁移清单与校验和（不含凭据）
+      description: '在 REPEATABLE READ 只读一致性快照中按白名单导出租户业务数据（租户、成员、智能体配置、知识库、文件、文档、会话、消息、运行、用量、钱包流水），密码哈希、API Key、集成凭据、邀请令牌等秘密一律排除。返回 manifest 及其 SHA-256 校验和，导入/迁移前可校验归档是否被篡改。导出审计写入失败时整个请求失败，不返回未留痕的数据。仅安装级平台管理员可访问。'
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: '导出成功，code=0，data 为导出结果'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - { properties: { data: { $ref: '#/components/schemas/ExportResult' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/PlatformAdminOnly' }
+        '500':
+          description: 'code=15900 导出失败（含租户不存在、审计写入失败）'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503': { $ref: '#/components/responses/IdentityUnavailable' }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+    toolTicket: { type: apiKey, in: header, name: Authorization, description: 'Tool <signed-ticket>' }
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      description: '资源 ID（UUID）'
+      schema: { type: string, format: uuid }
+  schemas:
+    Envelope:
+      type: object
+      required: [code, message]
+      description: '统一响应封装。成功 code=0、message=ok、data 为业务数据；错误 code 为业务错误码（14xxx 客户端错误、15xxx 服务端错误），无 data'
+      properties:
+        code: { type: integer }
+        message: { type: string }
+        data: {}
+    StatusMessage:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, ready] }
+    InstallationStatus:
+      type: object
+      required: [installed, mode]
+      properties:
+        installed: { type: boolean, description: '是否已完成首次安装' }
+        mode: { type: string, enum: [single, multi], description: '部署模式：single 单租户、multi 多租户' }
+        installationId: { type: string, format: uuid, description: '安装 ID，未安装时不返回' }
+        defaultTenantId: { type: string, format: uuid, description: '默认租户 ID，未安装时不返回' }
+    SetupInput:
+      type: object
+      required: [platformName, tenantName, adminUsername, adminName, adminPassword]
+      properties:
+        platformName: { type: string, minLength: 2, maxLength: 100, description: '平台名称' }
+        tenantName: { type: string, minLength: 2, maxLength: 100, description: '默认租户名称' }
+        adminUsername: { type: string, minLength: 3, maxLength: 64, description: '平台管理员登录名' }
+        adminName: { type: string, minLength: 2, maxLength: 64, description: '平台管理员显示名' }
+        adminPassword: { type: string, minLength: 8, maxLength: 128, description: '平台管理员登录密码（bcrypt 存储）' }
+    Capabilities:
+      type: object
+      required: [installed, appMode, features]
+      properties:
+        installed: { type: boolean }
+        appMode: { type: string, enum: [single, multi] }
+        features:
+          type: object
+          description: '前端功能开关'
+          properties:
+            tenantCreation: { type: boolean }
+            tenantSwitching: { type: boolean }
+            billing: { type: boolean }
+            payment: { type: boolean }
+            enterpriseDify: { type: boolean }
+            modelRouting: { type: boolean }
+            toolGateway: { type: boolean }
+            providerCosting: { type: boolean }
+            tenantExport: { type: boolean }
+    LoginInput:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, description: '登录名' }
+        password: { type: string, description: '密码' }
+    LoginResult:
+      type: object
+      required: [accessToken]
+      properties:
+        accessToken: { type: string, description: 'JWT 访问令牌，作为 Bearer 凭据调用受保护接口' }
+    UserInfo:
+      type: object
+      required: [userId, username, realName, avatar, roles, desc, homePath, token]
+      properties:
+        userId: { type: string, format: uuid }
+        username: { type: string }
+        realName: { type: string, description: '显示名' }
+        avatar: { type: string, description: '头像 URL，无头像时为空字符串' }
+        roles:
+          type: array
+          items: { type: string }
+          description: '当前租户角色（首位）及可选的 platform_admin 标记'
+        desc: { type: string, description: '固定描述文本' }
+        homePath: { type: string, description: '前端默认首页路径' }
+        token: { type: string, description: '预留字段，当前返回空字符串' }
+    RegisterInput:
+      type: object
+      required: [username, displayName, password]
+      properties:
+        username: { type: string, minLength: 3, maxLength: 64, description: '登录名，服务端转小写保存' }
+        displayName: { type: string, minLength: 2, maxLength: 64, description: '显示名，个人空间名称以其为前缀' }
+        password: { type: string, minLength: 8, maxLength: 128 }
+    RegisterResult:
+      type: object
+      required: [accessToken, tenantId]
+      properties:
+        accessToken: { type: string, description: '注册即签发的 JWT 访问令牌' }
+        tenantId: { type: string, format: uuid, description: '自动创建的个人空间租户 ID' }
+    TenantItem:
+      type: object
+      required: [id, name, type, role, status, current, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        type: { type: string, enum: [personal, organization], description: 'personal 个人空间、organization 企业空间' }
+        role: { type: string, enum: [owner, admin, finance, member], description: '当前用户在该租户的角色' }
+        status: { type: string, enum: [active] }
+        current: { type: boolean, description: '是否为当前令牌所选租户' }
+        createdAt: { type: string, format: date-time }
+    TenantCreateInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100, description: '企业空间名称' }
+    SwitchResult:
+      type: object
+      required: [accessToken, tenantId, role]
+      properties:
+        accessToken: { type: string, description: '绑定目标租户的新 JWT，后续请求须使用该令牌' }
+        tenantId: { type: string, format: uuid }
+        role: { type: string, enum: [owner, admin, finance, member] }
+    TenantMember:
+      type: object
+      required: [userId, username, displayName, role, status, joinedAt]
+      properties:
+        userId: { type: string, format: uuid }
+        username: { type: string }
+        displayName: { type: string }
+        role: { type: string, enum: [owner, admin, finance, member] }
+        status: { type: string, enum: [active] }
+        joinedAt: { type: string, format: date-time }
+    InviteInput:
+      type: object
+      required: [username, role]
+      properties:
+        username: { type: string, minLength: 3, maxLength: 64, description: '被邀请用户的登录名（须已注册），服务端转小写匹配' }
+        role: { type: string, enum: [admin, member, finance], description: '授予的角色' }
+    Invitation:
+      type: object
+      required: [id, tenantId, username, role, token, expiresAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        username: { type: string }
+        role: { type: string, enum: [admin, member, finance] }
+        token: { type: string, description: '原始邀请令牌，仅此一次返回（数据库只存 SHA-256 摘要），72 小时内有效' }
+        expiresAt: { type: string, format: date-time }
+    AcceptInvitationInput:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, minLength: 32, maxLength: 256, description: '邀请时返回的原始令牌' }
+    TransferOwnershipInput:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string, format: uuid, description: '新所有者的用户 ID，须为本租户活跃成员' }
+    SuccessFlag:
+      type: object
+      required: [success]
+      properties:
+        success: { type: boolean, const: true }
+    AgentItem:
+      type: object
+      required: [id, agentVersionId, name, description, category, version, parameterSchema, enabled, configured]
+      properties:
+        id: { type: string, format: uuid, description: '智能体模板 ID' }
+        agentVersionId: { type: string, format: uuid, description: '最新已发布版本 ID，创建运行时使用' }
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        version: { type: integer }
+        parameterSchema: { type: object, additionalProperties: true, description: '该版本的参数 JSON Schema' }
+        enabled: { type: boolean, description: '租户级启用开关（未配置时默认启用）' }
+        configured: { type: boolean, description: '是否已绑定可用 Dify 应用（租户专属绑定优先于共享绑定）' }
+    KnowledgeBaseItem:
+      type: object
+      required: [id, name, visibility, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        visibility: { type: string, enum: [private, tenant], description: 'private 仅所有者可见、tenant 租户共享' }
+        status: { type: string, enum: [provisioning, active], description: 'provisioning 本地已建待同步 Dify、active 上游数据集已就绪' }
+        createdAt: { type: string, format: date-time }
+    KnowledgeBaseCreateInput:
+      type: object
+      required: [name, visibility]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100 }
+        visibility: { type: string, enum: [private, tenant] }
+    KnowledgeDocument:
+      type: object
+      required: [id, name, contentType, sizeBytes, indexingStatus, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, description: '原始文件名' }
+        contentType: { type: string, description: '上传时的 MIME 类型，缺失时为 application/octet-stream' }
+        sizeBytes: { type: integer, format: int64 }
+        indexingStatus: { type: string, enum: [waiting, indexing], description: 'waiting 已落盘待上传/索引重试、indexing Dify 索引中（后续可能变为 completed/failed 等上游状态）' }
+        createdAt: { type: string, format: date-time }
+    RunCreateInput:
+      type: object
+      required: [agentVersionId, query]
+      properties:
+        agentVersionId: { type: string, format: uuid, description: '智能体版本 ID，须为已发布版本' }
+        conversationId: { type: string, format: uuid, description: '已有会话 ID，须属于当前用户且状态为 active；为空时自动创建新会话' }
+        query: { type: string, minLength: 1, maxLength: 20000, description: '用户输入文本' }
+        inputs: { type: object, additionalProperties: true, description: '智能体参数（须符合版本 parameterSchema）' }
+    Run:
+      type: object
+      required: [id, status, input, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        conversationId: { type: string, format: uuid, description: '所属会话 ID' }
+        status: { type: string, enum: [queued, dispatching, running, cancel_requested, succeeded, failed, stopped] }
+        input: { type: object, additionalProperties: true, description: '请求快照，含 query 与 inputs' }
+        output: { type: object, additionalProperties: true, description: '运行结果，终态后填充' }
+        errorCode: { type: string, description: '失败时的错误码' }
+        errorMessage: { type: string, description: '失败时的错误信息' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    RunEvent:
+      type: object
+      required: [sequence, eventType, payload, createdAt]
+      properties:
+        sequence: { type: integer, format: int64, description: '事件序号，单调递增，同时作为 SSE 的 id 字段' }
+        eventType: { type: string, description: '事件类型：run.queued、run.dispatch_deferred、run.started、run.delta、run.replace、run.agent_thought、run.workflow.*、run.billing_review、run.succeeded、run.failed、run.stopped' }
+        payload: { type: object, additionalProperties: true, description: '事件负载，如 {delta}、{content}、{status, output}、{status, code, message}' }
+        createdAt: { type: string, format: date-time }
+    ToolTicketInput:
+      type: object
+      required: [toolCode]
+      properties:
+        toolCode: { type: string, minLength: 2, maxLength: 64, description: '工具编码，服务端转小写匹配' }
+    ToolTicket:
+      type: object
+      required: [ticket, expiresAt]
+      properties:
+        ticket: { type: string, description: 'HMAC-SHA256 签名票据，调用 /api/v1/internal/tools/invoke 时置于 Authorization: Tool <ticket>' }
+        expiresAt: { type: string, format: date-time, description: '过期时间（签发后 5 分钟）' }
+    InvokeInput:
+      type: object
+      properties:
+        arguments: { type: object, additionalProperties: true, description: '传给工具的业务参数；身份信息由票据携带，请求体不可指定' }
+    Account:
+      type: object
+      required: [id, subjectType, currency, balance, frozenAmount, available, status]
+      properties:
+        id: { type: string, format: uuid }
+        subjectType: { type: string, enum: [user, tenant], description: 'user 用户钱包（个人空间）、tenant 租户共享钱包（企业空间）' }
+        currency: { type: string }
+        balance: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$', description: '余额，十进制字符串' }
+        frozenAmount: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$', description: '运行预占冻结金额，十进制字符串' }
+        available: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$', description: '可用金额 = balance - frozenAmount' }
+        status: { type: string, enum: [active] }
+    Plan:
+      type: object
+      required: [id, code, name, audience, versionId, version, billingPeriod, price, currency, benefits]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, description: '套餐编码，如 free' }
+        name: { type: string }
+        audience: { type: string, enum: [all, personal, organization], description: '适用租户类型，all 通用' }
+        versionId: { type: string, format: uuid, description: '当前生效的套餐版本 ID' }
+        version: { type: integer }
+        billingPeriod: { type: string, description: '计费周期，如 month' }
+        price: { type: string, description: '价格，十进制字符串' }
+        currency: { type: string }
+        benefits: { type: object, additionalProperties: true, description: '权益配置，键为权益名、值为限额' }
+    Entitlement:
+      type: object
+      required: [key, limit, used, reserved, periodEnd]
+      properties:
+        key: { type: string, description: '权益名' }
+        limit: { type: string, description: '周期限额，十进制字符串' }
+        used: { type: string, description: '已用量，十进制字符串' }
+        reserved: { type: string, description: '预占量，十进制字符串' }
+        periodEnd: { type: string, format: date-time }
+    Subscription:
+      type: object
+      required: [id, planCode, planName, status, currentPeriodStart, currentPeriodEnd, cancelAtPeriodEnd, entitlements]
+      properties:
+        id: { type: string, format: uuid }
+        planCode: { type: string }
+        planName: { type: string }
+        status: { type: string, enum: [trialing, active, past_due] }
+        currentPeriodStart: { type: string, format: date-time }
+        currentPeriodEnd: { type: string, format: date-time }
+        cancelAtPeriodEnd: { type: boolean }
+        entitlements:
+          type: array
+          items: { $ref: '#/components/schemas/Entitlement' }
+    LedgerEntry:
+      type: object
+      required: [id, entryType, amount, balanceAfter, frozenAfter, businessType, metadata, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        entryType: { type: string, enum: [grant, reserve, release, consume, adjust], description: 'grant 赠送、reserve 预占、release 释放、consume 消费、adjust 人工调账' }
+        amount: { type: string, pattern: '^-?[0-9]+(\.[0-9]+)?$', description: '变动金额（可为负），十进制字符串' }
+        balanceAfter: { type: string, description: '变动后余额' }
+        frozenAfter: { type: string, description: '变动后冻结金额' }
+        businessType: { type: string, enum: [signup_trial, ai_run, manual_adjustment], description: '业务类型：注册赠送、AI 运行、人工调账' }
+        businessId: { type: string, format: uuid, description: '关联业务 ID（如运行 ID），可为空' }
+        metadata: { type: object, additionalProperties: true, description: '附加信息（原因、Token 用量等）' }
+        createdAt: { type: string, format: date-time }
+    CostSummaryItem:
+      type: object
+      required: [costType, provider, model, amount, currency]
+      properties:
+        costType: { type: string, enum: [model_input, model_output], description: '成本类型：输入 Token、输出 Token' }
+        provider: { type: string, description: '模型供应商编码' }
+        model: { type: string, description: '模型名称' }
+        amount: { type: string, description: '汇总成本金额，十进制字符串' }
+        currency: { type: string }
+    ReconciliationReport:
+      type: object
+      required: [succeededRunsMissingUsage, reservationsAwaitingUsage, reservationsInReview, usageMissingCost]
+      properties:
+        succeededRunsMissingUsage: { type: integer, format: int64, description: '已成功但缺少用量记录的运行数' }
+        reservationsAwaitingUsage: { type: integer, format: int64, description: '等待用量回传的预占数' }
+        reservationsInReview: { type: integer, format: int64, description: '待人工复核的预占数' }
+        usageMissingCost: { type: integer, format: int64, description: '有用量但缺少成本记录的条数' }
+    AdjustmentInput:
+      type: object
+      required: [amount, idempotencyKey, reason]
+      properties:
+        amount: { type: string, pattern: '^-?[0-9]+(\.[0-9]+)?$', description: '调账金额，十进制字符串，正为加款、负为扣款，不可为 0' }
+        idempotencyKey: { type: string, minLength: 8, maxLength: 128, description: '幂等键，记录在钱包流水中' }
+        reason: { type: string, minLength: 2, maxLength: 255, description: '调账原因，写入流水 metadata' }
+    DifyInstance:
+      type: object
+      required: [id, name, baseUrl, status, deploymentType, healthStatus, consecutiveFailures, credentialVersion, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        baseUrl: { type: string, format: uri, description: 'Dify 服务地址（不含结尾斜杠）' }
+        status: { type: string, enum: [active] }
+        deploymentType: { type: string, enum: [shared, dedicated], description: 'shared 平台共享、dedicated 租户独享' }
+        healthStatus: { type: string, enum: [unknown, healthy, degraded, unavailable] }
+        lastHealthCheckAt: { type: string, format: date-time, description: '最近一次健康检查时间，未检查过则不返回' }
+        consecutiveFailures: { type: integer, description: '连续失败次数' }
+        credentialVersion: { type: integer, description: '凭据版本，每次轮换递增' }
+        createdAt: { type: string, format: date-time }
+    CreateDifyInstanceInput:
+      type: object
+      required: [name, baseUrl, apiKey]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100 }
+        baseUrl: { type: string, format: uri, description: 'Dify 服务地址' }
+        apiKey: { type: string, minLength: 8, description: 'Dify 管理 API Key，服务端加密保存' }
+        deploymentType: { type: string, enum: [shared, dedicated], description: '缺省为 dedicated' }
+    RotateCredentialInput:
+      type: object
+      required: [apiKey]
+      properties:
+        apiKey: { type: string, minLength: 8, description: '新的 Dify API Key，服务端加密保存' }
+    BindAppInput:
+      type: object
+      required: [agentVersionId, difyInstanceId, apiKey]
+      properties:
+        agentVersionId: { type: string, format: uuid, description: '智能体版本 ID' }
+        difyInstanceId: { type: string, format: uuid, description: 'Dify 实例 ID，须租户可见（自有或共享）' }
+        upstreamAppId: { type: string, description: '上游 Dify 应用 ID，可为空' }
+        apiKey: { type: string, minLength: 8, description: '该应用的 Dify API Key，服务端加密保存' }
+    CreateModelProvider:
+      type: object
+      required: [code, name, providerType, baseUrl]
+      properties:
+        code: { type: string, minLength: 2, maxLength: 64, description: '供应商编码，服务端转小写保存' }
+        name: { type: string, minLength: 2, maxLength: 100 }
+        providerType: { type: string, enum: [openai, anthropic, deepseek, ollama, vllm, compatible] }
+        baseUrl: { type: string, format: uri }
+        apiKey: { type: string, description: '供应商 API Key，可为空，非空时加密保存' }
+        shared: { type: boolean, description: 'true 为平台共享供应商（不归属任何租户）' }
+    ModelProvider:
+      type: object
+      required: [id, code, name, providerType, baseUrl, status, shared, healthStatus, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        providerType: { type: string, enum: [openai, anthropic, deepseek, ollama, vllm, compatible] }
+        baseUrl: { type: string, format: uri }
+        status: { type: string, enum: [active] }
+        shared: { type: boolean, description: '是否平台共享' }
+        healthStatus: { type: string, enum: [unknown, healthy, degraded, unavailable] }
+        lastHealthAt: { type: string, format: date-time, description: '最近一次健康检查时间，未检查过则不返回' }
+        createdAt: { type: string, format: date-time }
+    SetModelRouteInput:
+      type: object
+      required: [agentVersionId, providerId, model]
+      properties:
+        agentVersionId: { type: string, format: uuid }
+        providerId: { type: string, format: uuid, description: '供应商 ID，须为当前租户可用的活跃供应商' }
+        model: { type: string, minLength: 1, maxLength: 128, description: '模型名称' }
+        priority: { type: integer, minimum: 1, maximum: 1000, default: 100, description: '路由优先级，值越小越优先' }
+        config: { type: object, additionalProperties: true, description: '路由附加配置' }
+    ModelPrice:
+      type: object
+      required: [model, inputPer1000, outputPer1000]
+      properties:
+        model: { type: string, minLength: 1, maxLength: 128 }
+        inputPer1000: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$', description: '每千输入 Token 成本，十进制字符串' }
+        outputPer1000: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$', description: '每千输出 Token 成本，十进制字符串' }
+        currency: { type: string, maxLength: 16, default: CNY }
+    CreateTool:
+      type: object
+      required: [code, name, protocol, endpoint]
+      properties:
+        code: { type: string, minLength: 2, maxLength: 64, description: '工具编码，服务端转小写保存' }
+        name: { type: string, minLength: 2, maxLength: 100 }
+        description: { type: string }
+        protocol: { type: string, enum: [http_json, mcp_http], description: 'http_json 直接发送 arguments，mcp_http 以 JSON-RPC tools/call 封装' }
+        endpoint: { type: string, format: uri, description: '工具端点；生产环境必须 HTTPS 且禁止内网/回环/链路本地地址' }
+        method: { type: string, enum: [GET, POST, PUT, PATCH], default: POST }
+        credential: { type: string, description: '调用凭据（以 Bearer 头转发），服务端加密保存，不通过接口返回' }
+        inputSchema: { type: object, additionalProperties: true, description: '入参 JSON Schema' }
+        outputSchema: { type: object, additionalProperties: true, description: '出参 JSON Schema' }
+        timeoutMs: { type: integer, minimum: 100, maximum: 120000, default: 10000, description: '调用超时（毫秒）' }
+        maxResponseBytes: { type: integer, minimum: 1024, maximum: 10485760, default: 1048576, description: '响应体大小上限（字节）' }
+    Tool:
+      type: object
+      required: [id, code, name, description, protocol, status, version, endpoint, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        protocol: { type: string, enum: [http_json, mcp_http] }
+        status: { type: string, enum: [active] }
+        version: { type: integer, description: '最新有效版本号' }
+        endpoint: { type: string, format: uri, description: '最新有效版本的端点' }
+        createdAt: { type: string, format: date-time }
+    GrantInput:
+      type: object
+      required: [tenantId]
+      properties:
+        tenantId: { type: string, format: uuid, description: '被授权租户 ID' }
+        allowedAgentVersionIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: '允许调用的智能体版本白名单，为空表示不限制'
+        maxCallsPerRun: { type: integer, minimum: 1, maximum: 1000, default: 10, description: '单次运行调用上限，失败调用也计入' }
+    ExportResult:
+      type: object
+      required: [exportId, checksumSha256, manifest, exportedAt]
+      properties:
+        exportId: { type: string, format: uuid, description: '导出审计记录 ID' }
+        checksumSha256: { type: string, description: 'manifest 的 SHA-256 校验和' }
+        manifest:
+          type: object
+          additionalProperties: true
+          description: '迁移清单，含 formatVersion、tenantId、tenant、members、agentConfigs、knowledgeBases、files、documents、conversations、messages、runs、usage、walletLedger、exportedAt，不含任何凭据'
+        exportedAt: { type: string, format: date-time }
+  responses:
+    Success:
+      description: Successful envelope
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    Error:
+      description: Error envelope
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    Unauthorized:
+      description: '未认证或令牌不可用。code=14010 缺少访问令牌；14011 令牌无效或已过期；14013 用户或租户成员关系已失效'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    IdentityUnavailable:
+      description: '身份校验依赖（数据库）不可用。code=15012'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    PlatformAdminOnly:
+      description: '需要安装级平台管理员权限。code=14030'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }

@@ -1,4 +1,4 @@
-.PHONY: api worker web-install web-dev web-build infra-up infra-down migrate mode-precheck mode-upgrade check
+.PHONY: api worker web-install web-dev web-build infra-up infra-down migrate mode-precheck mode-upgrade check backup
 
 api:
 	cd server && go run ./cmd/api
@@ -33,4 +33,8 @@ mode-upgrade:
 check:
 	cd server && go test ./... && go vet ./...
 	cd web && corepack pnpm --filter @vben/web-ele typecheck
+
+backup:
+	@test -n "$(BACKUP_DIR)" || (echo "BACKUP_DIR=/absolute/path is required" && exit 2)
+	./deploy/scripts/backup.sh "$(BACKUP_DIR)"
 

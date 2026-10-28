@@ -6,7 +6,7 @@ const routes: RouteRecordRaw[] = [
     path: '/system',
     component: () => import('#/views/system/index.vue'),
     meta: {
-      authority: ['owner', 'admin'],
+      authority: ['platform_admin'],
       icon: 'lucide:settings-2',
       order: 30,
       title: '平台设置',

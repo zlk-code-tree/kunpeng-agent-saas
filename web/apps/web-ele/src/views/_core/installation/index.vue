@@ -25,6 +25,7 @@ const form = reactive({
   tenantName: '默认空间',
 });
 
+/** 提交首次安装表单，成功后进入登录页。 */
 async function install() {
   loading.value = true;
   try {
@@ -52,16 +53,35 @@ onMounted(async () => {
       </div>
     </template>
     <ElForm :model="form" label-position="top">
-      <ElFormItem label="平台名称"><ElInput v-model="form.platformName" /></ElFormItem>
-      <ElFormItem label="默认空间"><ElInput v-model="form.tenantName" /></ElFormItem>
+      <ElFormItem label="平台名称"
+        ><ElInput v-model="form.platformName"
+      /></ElFormItem>
+      <ElFormItem label="默认空间"
+        ><ElInput v-model="form.tenantName"
+      /></ElFormItem>
       <div class="grid grid-cols-2 gap-4">
-        <ElFormItem label="管理员账号"><ElInput v-model="form.adminUsername" /></ElFormItem>
-        <ElFormItem label="管理员名称"><ElInput v-model="form.adminName" /></ElFormItem>
+        <ElFormItem label="管理员账号"
+          ><ElInput v-model="form.adminUsername"
+        /></ElFormItem>
+        <ElFormItem label="管理员名称"
+          ><ElInput v-model="form.adminName"
+        /></ElFormItem>
       </div>
       <ElFormItem label="管理员密码">
-        <ElInput v-model="form.adminPassword" minlength="8" show-password type="password" />
+        <ElInput
+          v-model="form.adminPassword"
+          minlength="8"
+          show-password
+          type="password"
+        />
       </ElFormItem>
-      <ElButton class="w-full" :loading="loading" type="primary" @click="install">完成初始化</ElButton>
+      <ElButton
+        class="w-full"
+        :loading="loading"
+        type="primary"
+        @click="install"
+        >完成初始化</ElButton
+      >
     </ElForm>
   </ElCard>
 </template>

@@ -26,6 +26,7 @@ type report struct {
 	ToMode               string `json:"toMode"`
 }
 
+// main 预检或执行从单租户模式到多租户模式的数据迁移。
 func main() {
 	toMode := flag.String("to", "multi", "target mode; only multi is supported")
 	apply := flag.Bool("apply", false, "apply the migration; omission performs precheck only")
@@ -48,6 +49,8 @@ func main() {
 	}
 	defer db.Close()
 
+	// 锁定安装配置并在一个 SERIALIZABLE 事务内完成全部检查和回填。
+	// 预检模式执行相同语句但不提交，通过延迟回滚验证可行性且不改变数据。
 	tx, err := db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		fatal(err)
@@ -74,6 +77,7 @@ func main() {
 		fatal(err)
 	}
 	if ownerCount == 0 {
+		// 多租户模式要求明确所有者；旧单租户安装可能早于该约束，因此确定性地提升最早的有效成员。
 		command, err := tx.Exec(ctx, `
 			UPDATE tenant_members SET role='owner', updated_at=NOW()
 			WHERE id=(SELECT id FROM tenant_members WHERE tenant_id=$1 AND status='active' ORDER BY created_at LIMIT 1)
@@ -87,6 +91,7 @@ func main() {
 	var billingAccountID string
 	err = tx.QueryRow(ctx, `SELECT id::text FROM billing_accounts WHERE subject_type='tenant' AND subject_id=$1`, defaultTenantID).Scan(&billingAccountID)
 	if err == pgx.ErrNoRows {
+		// 单租户模式可能只有用户计费；切换多租户前默认组织必须拥有租户级钱包，才能让成员共享额度。
 		billingAccountID, _ = ids.New()
 		walletID, _ := ids.New()
 		if _, err := tx.Exec(ctx, `
@@ -109,9 +114,11 @@ func main() {
 	result.RunsBackfilled = command.RowsAffected()
 
 	if !*apply {
+		// 未调用 Commit 直接返回会触发延迟回滚；报告仍准确描述 --apply 将执行的修复。
 		printJSON(result)
 		return
 	}
+	// 模式变更记录和安装配置更新在同一事务中提交，避免审计显示成功但实际切换未提交。
 	migrationID, _ := ids.New()
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO tenant_mode_migrations (id,installation_id,from_mode,to_mode,status,report,started_at)
@@ -131,11 +138,13 @@ func main() {
 	printJSON(result)
 }
 
+// fatal 输出迁移失败原因并以非零状态退出。
 func fatal(err error) {
 	slog.Error("mode migration failed", "error", err)
 	os.Exit(1)
 }
 
+// printJSON 以便于脚本和人工阅读的缩进 JSON 输出迁移报告。
 func printJSON(value any) {
 	encoded, _ := json.MarshalIndent(value, "", "  ")
 	fmt.Println(string(encoded))

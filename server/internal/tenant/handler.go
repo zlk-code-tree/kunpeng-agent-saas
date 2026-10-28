@@ -12,8 +12,10 @@ import (
 
 type Handler struct{ service *Service }
 
+// NewHandler 创建租户与成员管理接口处理器。
 func NewHandler(service *Service) *Handler { return &Handler{service: service} }
 
+// Register 处理多租户模式的公开注册请求。
 func (h *Handler) Register(c *gin.Context) {
 	var input RegisterInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -27,6 +29,7 @@ func (h *Handler) Register(c *gin.Context) {
 	httpx.Created(c, result)
 }
 
+// List 返回当前用户加入的租户列表。
 func (h *Handler) List(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	items, err := h.service.List(c.Request.Context(), current.UserID, current.TenantID)
@@ -36,6 +39,7 @@ func (h *Handler) List(c *gin.Context) {
 	httpx.OK(c, items)
 }
 
+// Create 创建新的企业租户空间。
 func (h *Handler) Create(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	var input CreateInput
@@ -50,6 +54,7 @@ func (h *Handler) Create(c *gin.Context) {
 	httpx.Created(c, item)
 }
 
+// Switch 切换当前租户并返回绑定目标租户的新访问令牌。
 func (h *Handler) Switch(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	result, err := h.service.Switch(c.Request.Context(), current.UserID, c.Param("id"))
@@ -59,6 +64,7 @@ func (h *Handler) Switch(c *gin.Context) {
 	httpx.OK(c, result)
 }
 
+// Members 返回当前已切换租户的成员列表。
 func (h *Handler) Members(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") {
@@ -72,6 +78,7 @@ func (h *Handler) Members(c *gin.Context) {
 	httpx.OK(c, items)
 }
 
+// Invite 由租户所有者或管理员邀请成员。
 func (h *Handler) Invite(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") || !hasAnyRole(current.Roles, "owner", "admin") {
@@ -90,6 +97,7 @@ func (h *Handler) Invite(c *gin.Context) {
 	httpx.Created(c, item)
 }
 
+// AcceptInvitation 接受属于当前用户的有效邀请。
 func (h *Handler) AcceptInvitation(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	var input struct {
@@ -106,12 +114,14 @@ func (h *Handler) AcceptInvitation(c *gin.Context) {
 	httpx.OK(c, item)
 }
 
+// RemoveMember 按角色权限移除租户成员。
 func (h *Handler) RemoveMember(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") || !hasAnyRole(current.Roles, "owner", "admin") {
 		httpx.Error(c, 403, 14603, "permission denied")
 		return
 	}
+	// 中间件始终把当前租户角色放在首位；platform_admin 仅追加，不能替代租户内权限规则。
 	err := h.service.RemoveMember(c.Request.Context(), current.TenantID, current.UserID, current.Roles[0], c.Param("userId"))
 	if h.writeError(c, err) {
 		return
@@ -119,6 +129,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	httpx.OK(c, map[string]bool{"success": true})
 }
 
+// Leave 处理当前用户退出租户请求。
 func (h *Handler) Leave(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") {
@@ -131,6 +142,7 @@ func (h *Handler) Leave(c *gin.Context) {
 	httpx.OK(c, map[string]bool{"success": true})
 }
 
+// TransferOwnership 仅允许当前租户所有者转移所有权。
 func (h *Handler) TransferOwnership(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") || !hasAnyRole(current.Roles, "owner") {
@@ -150,6 +162,7 @@ func (h *Handler) TransferOwnership(c *gin.Context) {
 	httpx.OK(c, map[string]bool{"success": true})
 }
 
+// writeError 将租户领域错误映射为稳定的 HTTP 状态和业务错误码。
 func (h *Handler) writeError(c *gin.Context, err error) bool {
 	if err == nil {
 		return false
@@ -169,6 +182,7 @@ func (h *Handler) writeError(c *gin.Context, err error) bool {
 	return true
 }
 
+// hasAnyRole 判断当前身份是否包含任一允许角色。
 func hasAnyRole(current []string, expected ...string) bool {
 	set := make(map[string]struct{}, len(expected))
 	for _, role := range expected {

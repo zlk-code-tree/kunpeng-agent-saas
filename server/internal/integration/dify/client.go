@@ -54,13 +54,13 @@ type StreamEvent struct {
 
 type StreamCallback func(StreamEvent) error
 
+// NewClient 创建带统一请求超时的 Dify API 客户端。
 func NewClient(timeout time.Duration) *Client {
 	return &Client{httpClient: &http.Client{Timeout: timeout}}
 }
 
-// RunStreaming invokes a Dify chat, agent, chatflow, or workflow app in
-// streaming mode. It returns the content accumulated before the stream ends,
-// including when the callback asks the caller to stop processing.
+// RunStreaming 以流式模式调用 Dify 聊天、Agent、Chatflow 或 Workflow 应用。
+// 即使回调要求提前停止，也会返回停止前已经累计的任务标识、内容和用量。
 func (c *Client) RunStreaming(ctx context.Context, input RunRequest, callback StreamCallback) (RunResult, error) {
 	path, body := runPayload(input, "streaming")
 	resp, err := c.doJSON(ctx, http.MethodPost, input.BaseURL, path, input.APIKey, body)
@@ -78,6 +78,8 @@ func (c *Client) RunStreaming(ctx context.Context, input RunRequest, callback St
 
 	var result RunResult
 	terminal := false
+	// 先合并事件再调用回调。即使回调因用户取消而终止处理，调用方仍能获得已观察到的
+	// task id、部分输出和用量，用于停止上游任务及完成结算。
 	err = scanSSE(resp.Body, func(eventName string, data []byte) error {
 		var event StreamEvent
 		if err := json.Unmarshal(data, &event); err != nil {
@@ -118,7 +120,7 @@ func (c *Client) RunStreaming(ctx context.Context, input RunRequest, callback St
 	return result, nil
 }
 
-// Stop requests cancellation of an upstream Dify task.
+// Stop 请求取消上游 Dify 任务；空 taskID 按无需处理返回成功。
 func (c *Client) Stop(ctx context.Context, input RunRequest, taskID string) error {
 	if strings.TrimSpace(taskID) == "" {
 		return nil
@@ -142,6 +144,7 @@ func (c *Client) Stop(ctx context.Context, input RunRequest, taskID string) erro
 	return nil
 }
 
+// Run 以阻塞模式调用 Dify，并将不同应用类型的响应归一为 RunResult。
 func (c *Client) Run(ctx context.Context, input RunRequest) (RunResult, error) {
 	path, body := runPayload(input, "blocking")
 	resp, err := c.doJSON(ctx, http.MethodPost, input.BaseURL, path, input.APIKey, body)
@@ -185,7 +188,9 @@ func (c *Client) Run(ctx context.Context, input RunRequest) (RunResult, error) {
 	return RunResult{Answer: response.Answer, ConversationID: response.ConversationID, MessageID: response.MessageID, TaskID: response.TaskID, Usage: response.Metadata.Usage}, nil
 }
 
+// runPayload 根据 Dify 应用类型选择接口地址并构造对应请求体。
 func runPayload(input RunRequest, responseMode string) (string, map[string]any) {
+	// 会话应用和工作流使用不同端点及参数结构，在客户端内部统一映射，避免业务层重复判断。
 	path := "/chat-messages"
 	body := map[string]any{
 		"inputs":        input.Inputs,
@@ -203,6 +208,7 @@ func runPayload(input RunRequest, responseMode string) (string, map[string]any) 
 	return path, body
 }
 
+// doJSON 构造带 Dify API Key 的 JSON 请求并返回原始 HTTP 响应。
 func (c *Client) doJSON(ctx context.Context, method, baseURL, path, apiKey string, body any) (*http.Response, error) {
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -222,7 +228,10 @@ func (c *Client) doJSON(ctx context.Context, method, baseURL, path, apiKey strin
 	return resp, nil
 }
 
+// scanSSE 按 SSE 规范解析事件名和多行 data，并把完整事件交给回调处理。
 func scanSSE(reader io.Reader, callback func(eventName string, data []byte) error) error {
+	// 空行表示事件结束，冒号开头为心跳注释；工作流输出可能显著超过 64 KiB，
+	// 因此把 Scanner 最大缓冲区扩大到 16 MiB。
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
 	var eventName string
@@ -267,7 +276,10 @@ func scanSSE(reader io.Reader, callback func(eventName string, data []byte) erro
 	return flush()
 }
 
+// mergeStreamResult 将不同类型的流事件累积到统一运行结果中。
 func mergeStreamResult(result *RunResult, event StreamEvent) {
+	// Dify 可能在不同事件中返回标识，只覆盖非空值；普通消息追加增量，
+	// message_replace 则按协议要求整体替换现有答案。
 	if event.TaskID != "" {
 		result.TaskID = event.TaskID
 	}
@@ -301,6 +313,7 @@ func mergeStreamResult(result *RunResult, event StreamEvent) {
 	}
 }
 
+// workflowUsage 从工作流结束事件中提取计费和性能相关用量字段。
 func workflowUsage(data map[string]any) map[string]any {
 	usage := make(map[string]any)
 	for _, key := range []string{"total_tokens", "total_steps", "elapsed_time"} {
@@ -314,6 +327,7 @@ func workflowUsage(data map[string]any) map[string]any {
 	return usage
 }
 
+// truncate 限制上游错误正文长度，避免异常响应污染日志和 API 错误。
 func truncate(value string, max int) string {
 	if len(value) <= max {
 		return value

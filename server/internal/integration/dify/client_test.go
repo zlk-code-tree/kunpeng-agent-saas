@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+// TestRunStreamingChat 验证聊天流事件可以正确累积答案、标识和用量。
 func TestRunStreamingChat(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat-messages" {
@@ -56,6 +57,7 @@ func TestRunStreamingChat(t *testing.T) {
 	}
 }
 
+// TestRunStreamingWorkflowAndStop 验证工作流结果解析和停止接口路径。
 func TestRunStreamingWorkflowAndStop(t *testing.T) {
 	var stopped bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +94,7 @@ func TestRunStreamingWorkflowAndStop(t *testing.T) {
 	}
 }
 
+// TestRunStreamingReturnsPartialResultOnCallbackError 验证回调中断后仍返回已接收的部分结果。
 func TestRunStreamingReturnsPartialResultOnCallbackError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

@@ -18,14 +18,17 @@ type Handler struct {
 	redis         *redis.Client
 }
 
+// NewHandler 创建系统健康检查与能力查询处理器。
 func NewHandler(installations *installation.Service, db *pgxpool.Pool, redisClient *redis.Client) *Handler {
 	return &Handler{installations: installations, db: db, redis: redisClient}
 }
 
+// Health 只表示 HTTP 进程仍存活，不探测外部依赖。
 func (h *Handler) Health(c *gin.Context) {
 	httpx.OK(c, map[string]string{"status": "ok"})
 }
 
+// Ready 检查数据库和 Redis，只有核心依赖均可用时才允许接收业务流量。
 func (h *Handler) Ready(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
@@ -40,6 +43,7 @@ func (h *Handler) Ready(c *gin.Context) {
 	httpx.OK(c, map[string]string{"status": "ready"})
 }
 
+// Capabilities 根据安装模式返回前端可展示和可调用的平台能力。
 func (h *Handler) Capabilities(c *gin.Context) {
 	status, err := h.installations.Status(c.Request.Context())
 	if err != nil {
@@ -53,8 +57,13 @@ func (h *Handler) Capabilities(c *gin.Context) {
 		"features": map[string]bool{
 			"tenantCreation":  isMulti,
 			"tenantSwitching": isMulti,
-			"billing":         false,
+			"billing":         true,
 			"payment":         false,
+			"enterpriseDify":  true,
+			"modelRouting":    true,
+			"toolGateway":     true,
+			"providerCosting": true,
+			"tenantExport":    true,
 		},
 	})
 }

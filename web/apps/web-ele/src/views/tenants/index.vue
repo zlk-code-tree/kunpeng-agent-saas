@@ -54,6 +54,7 @@ const canManage = computed(() =>
   ['owner', 'admin'].includes(currentTenant.value?.role || ''),
 );
 
+/** 加载租户列表，并仅加载当前租户的成员。 */
 async function load() {
   loading.value = true;
   try {
@@ -66,6 +67,7 @@ async function load() {
   }
 }
 
+/** 创建企业空间并刷新列表。 */
 async function createTenant() {
   if (!createForm.name.trim()) return;
   await createTenantApi({ name: createForm.name.trim() });
@@ -75,6 +77,7 @@ async function createTenant() {
   await load();
 }
 
+/** 切换租户令牌后整页跳转，确保所有 Store 和权限路由按新租户重新初始化。 */
 async function switchTenant(item: TenantItem) {
   if (item.current || item.status !== 'active') return;
   const result = await switchTenantApi(item.id);
@@ -82,6 +85,7 @@ async function switchTenant(item: TenantItem) {
   window.location.assign('/workspace');
 }
 
+/** 创建成员邀请，并只在本次弹窗展示一次原始邀请令牌。 */
 async function invite() {
   const current = currentTenant.value;
   if (!current || !inviteForm.username.trim()) return;
@@ -98,6 +102,7 @@ async function invite() {
   );
 }
 
+/** 使用邀请令牌加入企业空间并刷新列表。 */
 async function acceptInvitation() {
   if (!invitationToken.value.trim()) return;
   await acceptTenantInvitationApi(invitationToken.value.trim());
@@ -107,6 +112,7 @@ async function acceptInvitation() {
   await load();
 }
 
+/** 二次确认后移除成员，并刷新当前租户成员列表。 */
 async function removeMember(member: TenantMemberItem) {
   const current = currentTenant.value;
   if (!current) return;
@@ -121,6 +127,7 @@ async function removeMember(member: TenantMemberItem) {
   members.value = await listTenantMembersApi(current.id);
 }
 
+/** 二次确认后转移租户所有权，并重新加载当前用户角色。 */
 async function transferOwnership(member: TenantMemberItem) {
   const current = currentTenant.value;
   if (!current) return;

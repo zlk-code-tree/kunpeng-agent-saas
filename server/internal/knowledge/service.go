@@ -46,10 +46,12 @@ type CreateInput struct {
 	Visibility string `json:"visibility" binding:"required,oneof=private tenant"`
 }
 
+// NewService 创建本地对象存储与 Dify 数据集协同的知识库服务。
 func NewService(db *pgxpool.Pool, store *objectstore.Store, box *secretbox.Box, difyClient *dify.Client) *Service {
 	return &Service{db: db, store: store, box: box, dify: difyClient}
 }
 
+// List 返回租户共享知识库和当前用户拥有的私有知识库。
 func (s *Service) List(ctx context.Context, tenantID, userID string) ([]Item, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id::text, name, visibility, status, created_at
@@ -72,6 +74,7 @@ func (s *Service) List(ctx context.Context, tenantID, userID string) ([]Item, er
 	return items, rows.Err()
 }
 
+// Create 创建本地知识库，并尽力在可用 Dify 实例上创建对应数据集。
 func (s *Service) Create(ctx context.Context, tenantID, userID string, input CreateInput) (Item, error) {
 	id, err := ids.New()
 	if err != nil {
@@ -86,6 +89,8 @@ func (s *Service) Create(ctx context.Context, tenantID, userID string, input Cre
 		return Item{}, fmt.Errorf("create knowledge base: %w", err)
 	}
 
+	// 优先选择租户自有 Dify，缺失时回退平台共享实例。Dify 不存在或临时不可用时，
+	// 本地知识库保留 provisioning 状态，不能因外部集成故障丢失本地业务数据。
 	var instanceID, baseURL string
 	var encrypted []byte
 	err = s.db.QueryRow(ctx, `
@@ -118,6 +123,7 @@ func (s *Service) Create(ctx context.Context, tenantID, userID string, input Cre
 	return item, nil
 }
 
+// Upload 保存原始文件和文档元数据，并尽力把同一文件提交给 Dify 建立索引。
 func (s *Service) Upload(ctx context.Context, tenantID, userID, knowledgeBaseID, name, contentType, checksum string, size int64, reader io.ReadSeeker) (Document, error) {
 	var baseURL, upstreamDatasetID string
 	var encrypted []byte
@@ -136,14 +142,18 @@ func (s *Service) Upload(ctx context.Context, tenantID, userID, knowledgeBaseID,
 	if err != nil {
 		return Document{}, err
 	}
+	// 对象键显式包含租户和知识库前缀，即使多个租户上传同名文件也能保持物理隔离。
 	objectKey := tenantID + "/" + knowledgeBaseID + "/" + fileID
 	if err := s.store.Put(ctx, objectKey, contentType, size, reader); err != nil {
 		return Document{}, err
 	}
+	// 对象存储会先消费文件流，转发给 Dify 前必须回到起点，因此调用方需要提供 io.ReadSeeker。
 	if _, err := reader.Seek(0, io.SeekStart); err != nil {
 		return Document{}, err
 	}
 
+	// 本地存储是数据事实来源。Dify 上传失败时文档保持 waiting，等待后续重试，
+	// 不能拒绝已经成功落入对象存储的文件。
 	indexingStatus := "waiting"
 	var upstreamDocumentID, upstreamBatchID string
 	if baseURL != "" && upstreamDatasetID != "" && len(encrypted) > 0 {
@@ -154,6 +164,7 @@ func (s *Service) Upload(ctx context.Context, tenantID, userID, knowledgeBaseID,
 		}
 	}
 
+	// 文件元数据和逻辑文档在同一事务提交，避免查询到没有对象存储引用的文档。
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return Document{}, err
@@ -177,6 +188,7 @@ func (s *Service) Upload(ctx context.Context, tenantID, userID, knowledgeBaseID,
 	return Document{ID: documentID, Name: name, ContentType: contentType, SizeBytes: size, IndexingStatus: indexingStatus, CreatedAt: time.Now().UTC()}, nil
 }
 
+// ListDocuments 在可见性规则下返回知识库文档及索引状态。
 func (s *Service) ListDocuments(ctx context.Context, tenantID, userID, knowledgeBaseID string) ([]Document, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT d.id::text, f.original_name, f.content_type, f.size_bytes, d.indexing_status, d.created_at
@@ -200,6 +212,7 @@ func (s *Service) ListDocuments(ctx context.Context, tenantID, userID, knowledge
 	return items, rows.Err()
 }
 
+// nullValue 将空的上游标识转换为数据库 NULL。
 func nullValue(value string) any {
 	if value == "" {
 		return nil

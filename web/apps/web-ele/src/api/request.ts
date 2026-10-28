@@ -21,15 +21,14 @@ import { refreshTokenApi } from './core';
 
 const { apiURL } = useAppConfig(import.meta.env, import.meta.env.PROD);
 
+/** 创建带认证、统一响应解包和错误提示的业务请求客户端。 */
 function createRequestClient(baseURL: string, options?: RequestClientOptions) {
   const client = new RequestClient({
     ...options,
     baseURL,
   });
 
-  /**
-   * 重新认证逻辑
-   */
+  /** 清理失效令牌，并根据用户偏好显示登录过期提示或退出登录。 */
   async function doReAuthenticate() {
     console.warn('Access token or refresh token is invalid or expired. ');
     const accessStore = useAccessStore();
@@ -45,9 +44,7 @@ function createRequestClient(baseURL: string, options?: RequestClientOptions) {
     }
   }
 
-  /**
-   * 刷新token逻辑
-   */
+  /** 使用刷新令牌换取新访问令牌并更新全局状态。 */
   async function doRefreshToken() {
     const accessStore = useAccessStore();
     const resp = await refreshTokenApi();
@@ -56,6 +53,7 @@ function createRequestClient(baseURL: string, options?: RequestClientOptions) {
     return newToken;
   }
 
+  /** 将原始令牌转换为标准 Authorization Bearer 格式。 */
   function formatToken(token: null | string) {
     return token ? `Bearer ${token}` : null;
   }

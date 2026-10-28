@@ -5,6 +5,7 @@ import (
 	"fmt"
 )
 
+// New 使用密码学安全随机数生成符合 RFC 4122 布局的 UUID v4 字符串。
 func New() (string, error) {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {

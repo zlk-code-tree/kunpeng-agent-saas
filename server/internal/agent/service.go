@@ -24,11 +24,15 @@ type Item struct {
 	Configured      bool           `json:"configured"`
 }
 
+// NewService 创建预置智能体查询服务。
 func NewService(db *pgxpool.Pool) *Service {
 	return &Service{db: db}
 }
 
+// List 返回当前租户可用的最新已发布智能体版本和配置状态。
 func (s *Service) List(ctx context.Context, tenantID string) ([]Item, error) {
+	// 智能体模板全局共享，但启用状态和 Dify 绑定按租户隔离。
+	// 租户专属绑定优先于共享兜底绑定，与执行 Worker 的实际路由规则保持一致。
 	rows, err := s.db.Query(ctx, `
 		SELECT t.id::text, v.id::text, t.name, t.description, COALESCE(t.category, ''),
 		       v.version, v.parameter_schema,

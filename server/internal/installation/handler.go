@@ -12,10 +12,12 @@ type Handler struct {
 	service *Service
 }
 
+// NewHandler 创建平台安装接口处理器。
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
+// Status 返回平台当前安装状态和运行模式。
 func (h *Handler) Status(c *gin.Context) {
 	status, err := h.service.Status(c.Request.Context())
 	if err != nil {
@@ -25,6 +27,7 @@ func (h *Handler) Status(c *gin.Context) {
 	httpx.OK(c, status)
 }
 
+// Setup 处理一次性平台初始化请求。
 func (h *Handler) Setup(c *gin.Context) {
 	var input SetupInput
 	if err := c.ShouldBindJSON(&input); err != nil {

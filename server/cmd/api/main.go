@@ -17,6 +17,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// main 启动 API 服务，校验依赖和安装状态，并在退出信号到达时优雅关闭。
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -30,10 +31,16 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	if err := database.ValidateInstallation(ctx, db, cfg.Mode, 5); err != nil {
+		slog.Error("installation validation failed", "error", err)
+		os.Exit(1)
+	}
 
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.Redis.Addr, Password: cfg.Redis.Password, DB: cfg.Redis.DB})
 	defer redisClient.Close()
 
+	// 流式响应可能持续较长时间，因此不设置全局 WriteTimeout；具体的上游调用
+	// 由 Dify 客户端自己的超时和请求上下文负责终止。
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           appserver.NewRouter(cfg, db, redisClient),
@@ -50,6 +57,7 @@ func main() {
 		}
 	}()
 
+	// 收到退出信号后停止接收新请求，并给予正在处理的请求最多 15 秒完成。
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 	<-shutdown

@@ -9,6 +9,7 @@ type TaskPayload struct {
 	TenantID string `json:"tenantId"`
 }
 
+// EncodeTask 将运行任务编码成 Asynq 可传输的 JSON 负载。
 func EncodeTask(payload TaskPayload) ([]byte, error) {
 	return json.Marshal(payload)
 }

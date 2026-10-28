@@ -19,10 +19,12 @@ type Handler struct {
 
 const maxUploadSize = 50 << 20
 
+// NewHandler 创建知识库接口处理器。
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
+// Upload 校验 multipart 文件、计算摘要并提交知识库上传。
 func (h *Handler) Upload(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadSize)
@@ -54,6 +56,7 @@ func (h *Handler) Upload(c *gin.Context) {
 	httpx.Created(c, item)
 }
 
+// ListDocuments 返回指定知识库的文档列表。
 func (h *Handler) ListDocuments(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	items, err := h.service.ListDocuments(c.Request.Context(), identity.TenantID, identity.UserID, c.Param("id"))
@@ -64,6 +67,7 @@ func (h *Handler) ListDocuments(c *gin.Context) {
 	httpx.OK(c, items)
 }
 
+// checksumFile 计算文件 SHA-256，并在返回前把文件指针复位供后续上传使用。
 func checksumFile(file multipart.File) (string, error) {
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
@@ -75,6 +79,7 @@ func checksumFile(file multipart.File) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+// List 返回当前用户可见的知识库列表。
 func (h *Handler) List(c *gin.Context) {
 	identity, ok := requestctx.Get(c)
 	if !ok {
@@ -89,6 +94,7 @@ func (h *Handler) List(c *gin.Context) {
 	httpx.OK(c, items)
 }
 
+// Create 创建私有或租户共享知识库。
 func (h *Handler) Create(c *gin.Context) {
 	identity, ok := requestctx.Get(c)
 	if !ok {

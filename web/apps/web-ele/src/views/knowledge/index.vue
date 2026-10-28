@@ -34,6 +34,7 @@ const form = reactive<{ name: string; visibility: 'private' | 'tenant' }>({
   visibility: 'private',
 });
 
+/** 加载知识库列表，并同步加载每个知识库的文档。 */
 async function load() {
   loading.value = true;
   try {
@@ -43,14 +44,19 @@ async function load() {
   }
 }
 
+/** 创建知识库后关闭弹窗并刷新列表。 */
 async function create() {
   if (!form.name.trim()) return;
-  await createKnowledgeBaseApi({ name: form.name.trim(), visibility: form.visibility });
+  await createKnowledgeBaseApi({
+    name: form.name.trim(),
+    visibility: form.visibility,
+  });
   dialogVisible.value = false;
   form.name = '';
   await load();
 }
 
+/** 上传单个知识库文档并刷新索引状态列表。 */
 async function upload(knowledgeBaseID: string, file: File) {
   await uploadKnowledgeDocumentApi(knowledgeBaseID, file);
   ElMessage.success('文件已上传，等待 Dify 建立索引');
@@ -60,16 +66,23 @@ onMounted(load);
 </script>
 
 <template>
-  <Page description="个人资料默认私有；多租户模式可显式共享到当前租户" title="私有知识库">
+  <Page
+    description="个人资料默认私有；多租户模式可显式共享到当前租户"
+    title="私有知识库"
+  >
     <template #extra>
-      <ElButton type="primary" @click="dialogVisible = true">新建知识库</ElButton>
+      <ElButton type="primary" @click="dialogVisible = true"
+        >新建知识库</ElButton
+      >
     </template>
     <div v-loading="loading" class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
       <ElCard v-for="item in items" :key="item.id" shadow="hover">
         <template #header>
           <div class="flex items-center justify-between">
             <strong>{{ item.name }}</strong>
-            <ElTag>{{ item.visibility === 'private' ? '私有' : '租户共享' }}</ElTag>
+            <ElTag>{{
+              item.visibility === 'private' ? '私有' : '租户共享'
+            }}</ElTag>
           </div>
         </template>
         <div class="text-sm text-gray-500">状态：{{ item.status }}</div>

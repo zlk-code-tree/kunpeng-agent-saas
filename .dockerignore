@@ -1,0 +1,8 @@
+.git
+.gitignore
+web/node_modules
+web/apps/*/dist
+web/apps/*/dist.zip
+**/.turbo
+**/.cache
+**/*.log

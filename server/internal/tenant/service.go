@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"gin-dify-saas/server/internal/billing"
 	"gin-dify-saas/server/internal/identity"
 	"gin-dify-saas/server/internal/platform/ids"
 
@@ -89,11 +90,14 @@ type Invitation struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
+// NewService 创建租户、成员和邀请管理服务。
 func NewService(db *pgxpool.Pool, tokens *identity.TokenManager, configuredMode string) *Service {
 	return &Service{db: db, tokens: tokens, configuredMode: configuredMode}
 }
 
+// Register 在多租户模式下注册用户，并创建其个人空间、所有者成员关系和计费账户。
 func (s *Service) Register(ctx context.Context, input RegisterInput) (RegisterResult, error) {
+	// 同时检查运行配置和数据库安装模式，防止配置错误的进程在单租户数据库上开放注册。
 	if s.configuredMode != "multi" {
 		return RegisterResult{}, ErrMultiModeOnly
 	}
@@ -113,10 +117,10 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (RegisterRe
 	userID, _ := ids.New()
 	tenantID, _ := ids.New()
 	membershipID, _ := ids.New()
-	billingAccountID, _ := ids.New()
-	walletID, _ := ids.New()
 	tenantName := strings.TrimSpace(input.DisplayName) + "的个人空间"
 
+	// 用户、个人租户、所有者成员关系和计费账户必须整体创建。
+	// SERIALIZABLE 防止并发注册造成同一用户名被部分初始化，或出现没有所有者/钱包的租户。
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return RegisterResult{}, err
@@ -140,7 +144,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (RegisterRe
 	`, membershipID, tenantID, userID); err != nil {
 		return RegisterResult{}, err
 	}
-	if err := createBillingAccount(ctx, tx, billingAccountID, walletID, tenantID, "user", userID); err != nil {
+	if _, err := billing.ProvisionAccount(ctx, tx, tenantID, "user", userID); err != nil {
 		return RegisterResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -153,6 +157,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (RegisterRe
 	return RegisterResult{AccessToken: token, TenantID: tenantID}, nil
 }
 
+// List 返回用户加入的所有有效租户，并标记当前令牌所选择的租户。
 func (s *Service) List(ctx context.Context, userID, currentTenantID string) ([]Item, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT t.id::text, t.name, t.type, tm.role, t.status, t.created_at
@@ -176,6 +181,7 @@ func (s *Service) List(ctx context.Context, userID, currentTenantID string) ([]I
 	return items, rows.Err()
 }
 
+// Create 在多租户模式下创建企业空间、所有者成员关系和企业共享计费账户。
 func (s *Service) Create(ctx context.Context, userID string, input CreateInput) (Item, error) {
 	if s.configuredMode != "multi" {
 		return Item{}, ErrMultiModeOnly
@@ -185,9 +191,8 @@ func (s *Service) Create(ctx context.Context, userID string, input CreateInput) 
 	}
 	tenantID, _ := ids.New()
 	membershipID, _ := ids.New()
-	billingAccountID, _ := ids.New()
-	walletID, _ := ids.New()
 	item := Item{ID: tenantID, Name: strings.TrimSpace(input.Name), Type: "organization", Role: "owner", Status: "active", CreatedAt: time.Now().UTC()}
+	// 企业计费归属租户而不是创建者，使企业成员共享额度，同时个人空间仍保留独立用户钱包。
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return Item{}, err
@@ -203,7 +208,7 @@ func (s *Service) Create(ctx context.Context, userID string, input CreateInput) 
 	`, membershipID, tenantID, userID); err != nil {
 		return Item{}, err
 	}
-	if err := createBillingAccount(ctx, tx, billingAccountID, walletID, tenantID, "tenant", tenantID); err != nil {
+	if _, err := billing.ProvisionAccount(ctx, tx, tenantID, "tenant", tenantID); err != nil {
 		return Item{}, err
 	}
 	if err := insertAudit(ctx, tx, tenantID, userID, "tenant.create", "tenant", tenantID, map[string]any{"name": item.Name}); err != nil {
@@ -215,7 +220,9 @@ func (s *Service) Create(ctx context.Context, userID string, input CreateInput) 
 	return item, nil
 }
 
+// Switch 校验实时成员关系后，为目标租户签发新的访问令牌。
 func (s *Service) Switch(ctx context.Context, userID, tenantID string) (SwitchResult, error) {
+	// 旧令牌不能直接授权租户切换；必须重新读取有效用户、租户和成员角色。
 	var installationID, username, role string
 	err := s.db.QueryRow(ctx, `
 		SELECT i.id::text, u.username, tm.role
@@ -238,6 +245,7 @@ func (s *Service) Switch(ctx context.Context, userID, tenantID string) (SwitchRe
 	return SwitchResult{AccessToken: token, TenantID: tenantID, Role: role}, nil
 }
 
+// Members 按角色优先级返回租户当前有效成员。
 func (s *Service) Members(ctx context.Context, tenantID string) ([]Member, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT u.id::text, u.username, u.display_name, tm.role, tm.status, tm.created_at
@@ -260,6 +268,7 @@ func (s *Service) Members(ctx context.Context, tenantID string) ([]Member, error
 	return items, rows.Err()
 }
 
+// Invite 为已注册用户创建限时租户邀请，并返回仅展示一次的原始令牌。
 func (s *Service) Invite(ctx context.Context, tenantID, actorUserID string, input InviteInput) (Invitation, error) {
 	var targetUserID, username string
 	if err := s.db.QueryRow(ctx, `SELECT id::text, username FROM users WHERE username=$1 AND status='active'`, strings.ToLower(strings.TrimSpace(input.Username))).Scan(&targetUserID, &username); errors.Is(err, pgx.ErrNoRows) {
@@ -278,6 +287,7 @@ func (s *Service) Invite(ctx context.Context, tenantID, actorUserID string, inpu
 		UPDATE tenant_invitations SET status='expired', updated_at=NOW()
 		WHERE tenant_id=$1 AND invitee_user_id=$2 AND status='pending' AND expires_at <= NOW()
 	`, tenantID, targetUserID)
+	// 原始令牌只返回一次，数据库仅保存 SHA-256 摘要，数据库泄露后不能直接接受未完成邀请。
 	token, tokenHash, err := invitationToken()
 	if err != nil {
 		return Invitation{}, err
@@ -294,6 +304,7 @@ func (s *Service) Invite(ctx context.Context, tenantID, actorUserID string, inpu
 	return Invitation{ID: id, TenantID: tenantID, Username: username, Role: input.Role, Token: token, ExpiresAt: expiresAt}, nil
 }
 
+// AcceptInvitation 原子消费邀请并创建或恢复用户的租户成员关系。
 func (s *Service) AcceptInvitation(ctx context.Context, userID, token string) (Item, error) {
 	tokenHash := hashToken(strings.TrimSpace(token))
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -303,6 +314,7 @@ func (s *Service) AcceptInvitation(ctx context.Context, userID, token string) (I
 	defer tx.Rollback(ctx)
 	var invitationID, tenantID, role string
 	var expiresAt time.Time
+	// 锁定待处理邀请，防止并发请求重复接受；成员关系使用 Upsert，支持重新邀请已退出用户。
 	err = tx.QueryRow(ctx, `
 		SELECT id::text, tenant_id::text, role, expires_at
 		FROM tenant_invitations
@@ -340,6 +352,7 @@ func (s *Service) AcceptInvitation(ctx context.Context, userID, token string) (I
 	return item, nil
 }
 
+// RemoveMember 按租户角色规则移除目标成员。
 func (s *Service) RemoveMember(ctx context.Context, tenantID, actorUserID, actorRole, targetUserID string) error {
 	if actorUserID == targetUserID {
 		return ErrForbidden
@@ -350,6 +363,7 @@ func (s *Service) RemoveMember(ctx context.Context, tenantID, actorUserID, actor
 	} else if err != nil {
 		return err
 	}
+	// 所有者必须显式转移所有权，同级管理员不能互相移除，确保高权限变化明确且可追踪。
 	if targetRole == "owner" || actorRole == "admin" && targetRole == "admin" {
 		return ErrForbidden
 	}
@@ -363,6 +377,7 @@ func (s *Service) RemoveMember(ctx context.Context, tenantID, actorUserID, actor
 	return nil
 }
 
+// Leave 让普通成员退出租户；所有者必须先完成所有权转移。
 func (s *Service) Leave(ctx context.Context, tenantID, userID string) error {
 	var role string
 	if err := s.db.QueryRow(ctx, `SELECT role FROM tenant_members WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, tenantID, userID).Scan(&role); errors.Is(err, pgx.ErrNoRows) {
@@ -377,10 +392,12 @@ func (s *Service) Leave(ctx context.Context, tenantID, userID string) error {
 	return err
 }
 
+// TransferOwnership 原子地把租户所有权从当前所有者转移给目标成员。
 func (s *Service) TransferOwnership(ctx context.Context, tenantID, ownerUserID, targetUserID string) error {
 	if ownerUserID == targetUserID {
 		return ErrConflict
 	}
+	// 原所有者降级和新所有者升级必须原子完成，不能提交双所有者或无所有者的中间状态。
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
@@ -404,6 +421,7 @@ func (s *Service) TransferOwnership(ctx context.Context, tenantID, ownerUserID, 
 	return tx.Commit(ctx)
 }
 
+// ensureInstalledMulti 校验数据库持久化的安装模式确实为多租户。
 func (s *Service) ensureInstalledMulti(ctx context.Context) error {
 	var mode string
 	if err := s.db.QueryRow(ctx, `SELECT mode FROM installation_settings LIMIT 1`).Scan(&mode); err != nil {
@@ -415,17 +433,7 @@ func (s *Service) ensureInstalledMulti(ctx context.Context) error {
 	return nil
 }
 
-func createBillingAccount(ctx context.Context, tx pgx.Tx, accountID, walletID, tenantID, subjectType, subjectID string) error {
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO billing_accounts (id, tenant_id, subject_type, subject_id, status)
-		VALUES ($1,$2,$3,$4,'active')
-	`, accountID, tenantID, subjectType, subjectID); err != nil {
-		return err
-	}
-	_, err := tx.Exec(ctx, `INSERT INTO wallet_accounts (id, billing_account_id) VALUES ($1,$2)`, walletID, accountID)
-	return err
-}
-
+// insertAudit 在调用方事务内写入租户操作审计，保证审计与业务变更同时提交。
 func insertAudit(ctx context.Context, tx pgx.Tx, tenantID, actorUserID, action, resourceType, resourceID string, metadata map[string]any) error {
 	id, _ := ids.New()
 	_, err := tx.Exec(ctx, `
@@ -435,6 +443,7 @@ func insertAudit(ctx context.Context, tx pgx.Tx, tenantID, actorUserID, action, 
 	return err
 }
 
+// invitationToken 生成高熵邀请令牌，并同时返回可持久化的摘要。
 func invitationToken() (string, string, error) {
 	value := make([]byte, 32)
 	if _, err := rand.Read(value); err != nil {
@@ -444,15 +453,18 @@ func invitationToken() (string, string, error) {
 	return token, hashToken(token), nil
 }
 
+// hashToken 返回令牌的 SHA-256 十六进制摘要。
 func hashToken(value string) string {
 	hash := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(hash[:])
 }
 
+// slug 根据资源类型和 UUID 生成稳定、低冲突的租户短标识。
 func slug(prefix, id string) string {
 	return fmt.Sprintf("%s-%s", prefix, strings.ReplaceAll(id, "-", "")[:16])
 }
 
+// classifyConflict 将 PostgreSQL 唯一约束错误转换为领域冲突错误。
 func classifyConflict(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {

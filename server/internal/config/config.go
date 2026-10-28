@@ -45,6 +45,7 @@ type StorageConfig struct {
 	UseSSL    bool
 }
 
+// Load 从环境变量加载运行配置，并在启动前校验模式、密钥和超时等关键参数。
 func Load() (Config, error) {
 	redisDB, err := strconv.Atoi(env("REDIS_DB", "0"))
 	if err != nil {
@@ -91,6 +92,7 @@ func Load() (Config, error) {
 	}, nil
 }
 
+// env 获取非空环境变量；变量缺失或为空时使用默认值。
 func env(key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok && value != "" {
 		return value
@@ -98,6 +100,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
+// splitCSV 将逗号分隔配置拆分并清理为空值安全的字符串列表。
 func splitCSV(value string) []string {
 	parts := strings.Split(value, ",")
 	result := make([]string, 0, len(parts))

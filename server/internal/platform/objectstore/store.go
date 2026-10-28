@@ -21,6 +21,7 @@ type Store struct {
 	err    error
 }
 
+// New 根据 S3 兼容配置创建对象存储客户端。
 func New(cfg config.StorageConfig) (*Store, error) {
 	endpoint, err := url.Parse(cfg.Endpoint)
 	if err != nil || endpoint.Host == "" {
@@ -36,7 +37,10 @@ func New(cfg config.StorageConfig) (*Store, error) {
 	return &Store{client: client, bucket: cfg.Bucket}, nil
 }
 
+// Put 确保存储桶存在后，以指定对象键上传文件流。
 func (s *Store) Put(ctx context.Context, key, contentType string, size int64, reader io.Reader) error {
+	// 存储桶延迟创建并由 sync.Once 保护，避免每次上传都调用控制面，
+	// 也使多个并发的首次上传只执行一次建桶操作。
 	s.once.Do(func() {
 		exists, err := s.client.BucketExists(ctx, s.bucket)
 		if err != nil {

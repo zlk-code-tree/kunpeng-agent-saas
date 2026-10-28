@@ -12,6 +12,7 @@ import (
 	"strings"
 )
 
+// CreateDataset 在 Dify 创建仅当前应用可访问的知识库数据集。
 func (c *Client) CreateDataset(ctx context.Context, baseURL, apiKey, name string) (string, error) {
 	body, _ := json.Marshal(map[string]any{"name": name, "permission": "only_me"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/datasets", bytes.NewReader(body))
@@ -41,7 +42,10 @@ func (c *Client) CreateDataset(ctx context.Context, baseURL, apiKey, name string
 	return response.ID, nil
 }
 
+// UploadDocument 通过 multipart 请求把文件上传到 Dify 数据集并返回文档和批次标识。
 func (c *Client) UploadDocument(ctx context.Context, baseURL, apiKey, datasetID, filename string, reader io.Reader) (documentID, batch string, err error) {
+	// Dify 要求索引策略以 JSON 字符串字段与文件一同提交；filepath.Base 可避免把
+	// 客户端提供的完整本地路径透传成远程文件名。
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	data, _ := json.Marshal(map[string]any{
