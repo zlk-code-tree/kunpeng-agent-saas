@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.idea/
+.vscode/
+*.log
+
+server/bin/
+server/coverage.out
+
+web/node_modules/
+web/.turbo/
+web/apps/*/dist/
+web/apps/*/dist.zip
+
+deploy/data/
+
