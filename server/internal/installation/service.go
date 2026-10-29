@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"gin-dify-saas/server/internal/billing"
 	"gin-dify-saas/server/internal/platform/ids"
 
 	"github.com/jackc/pgx/v5"
@@ -16,33 +15,19 @@ import (
 
 var ErrAlreadyInstalled = errors.New("platform is already installed")
 
-type Service struct {
+type InstallationService struct {
 	db             *pgxpool.Pool
+	accounts       AccountProvisioner
 	configuredMode string
 }
 
-type Status struct {
-	Installed       bool   `json:"installed"`
-	Mode            string `json:"mode"`
-	InstallationID  string `json:"installationId,omitempty"`
-	DefaultTenantID string `json:"defaultTenantId,omitempty"`
-}
-
-type SetupInput struct {
-	PlatformName  string `json:"platformName" binding:"required,min=2,max=100"`
-	TenantName    string `json:"tenantName" binding:"required,min=2,max=100"`
-	AdminUsername string `json:"adminUsername" binding:"required,min=3,max=64"`
-	AdminName     string `json:"adminName" binding:"required,min=2,max=64"`
-	AdminPassword string `json:"adminPassword" binding:"required,min=8,max=128"`
-}
-
-// NewService 创建平台首次安装服务，并保留进程配置的单/多租户模式。
-func NewService(db *pgxpool.Pool, configuredMode string) *Service {
-	return &Service{db: db, configuredMode: configuredMode}
+// NewInstallationService 创建平台首次安装服务，并保留进程配置的单/多租户模式。
+func NewInstallationService(db *pgxpool.Pool, accounts AccountProvisioner, configuredMode string) *InstallationService {
+	return &InstallationService{db: db, accounts: accounts, configuredMode: configuredMode}
 }
 
 // Status 返回安装状态，并验证运行配置模式与数据库持久化模式一致。
-func (s *Service) Status(ctx context.Context) (Status, error) {
+func (s *InstallationService) Status(ctx context.Context) (Status, error) {
 	var status Status
 	err := s.db.QueryRow(ctx, `
 		SELECT id::text, mode, default_tenant_id::text
@@ -63,7 +48,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 }
 
 // Setup 原子完成首次安装，创建默认租户、平台管理员、计费账户和预置智能体。
-func (s *Service) Setup(ctx context.Context, input SetupInput) (Status, error) {
+func (s *InstallationService) Setup(ctx context.Context, input SetupInput) (Status, error) {
 	status, err := s.Status(ctx)
 	if err != nil {
 		return Status{}, err
@@ -107,7 +92,7 @@ func (s *Service) Setup(ctx context.Context, input SetupInput) (Status, error) {
 	if err != nil {
 		return Status{}, fmt.Errorf("begin installation: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// 事务外的 Status 只是快速判断，不能阻止并发竞争，因此进入事务后必须再次检查安装锁。
 	var count int
@@ -142,7 +127,7 @@ func (s *Service) Setup(ctx context.Context, input SetupInput) (Status, error) {
 	`, installationID, s.configuredMode, strings.TrimSpace(input.PlatformName), tenantID); err != nil {
 		return Status{}, fmt.Errorf("save installation settings: %w", err)
 	}
-	if _, err := billing.ProvisionAccount(ctx, tx, tenantID, "tenant", tenantID); err != nil {
+	if err := s.accounts.ProvisionAccount(ctx, tx, tenantID, "tenant", tenantID); err != nil {
 		return Status{}, fmt.Errorf("create default billing account: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `

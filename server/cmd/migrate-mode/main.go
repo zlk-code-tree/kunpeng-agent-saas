@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -55,7 +56,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var installationID, fromMode, defaultTenantID string
 	if err := tx.QueryRow(ctx, `
 		SELECT id::text, mode, default_tenant_id::text FROM installation_settings LIMIT 1 FOR UPDATE
@@ -90,7 +91,7 @@ func main() {
 
 	var billingAccountID string
 	err = tx.QueryRow(ctx, `SELECT id::text FROM billing_accounts WHERE subject_type='tenant' AND subject_id=$1`, defaultTenantID).Scan(&billingAccountID)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		// 单租户模式可能只有用户计费；切换多租户前默认组织必须拥有租户级钱包，才能让成员共享额度。
 		billingAccountID, _ = ids.New()
 		walletID, _ := ids.New()

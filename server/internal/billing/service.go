@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strconv"
 	"strings"
 	"time"
 
 	"gin-dify-saas/server/internal/platform/ids"
+	usageutil "gin-dify-saas/server/internal/platform/usage"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,91 +23,10 @@ var (
 	ErrInvalidAmount       = errors.New("invalid adjustment amount")
 )
 
-type Service struct{ db *pgxpool.Pool }
+type BillingService struct{ db *pgxpool.Pool }
 
-type Account struct {
-	ID           string `json:"id"`
-	SubjectType  string `json:"subjectType"`
-	Currency     string `json:"currency"`
-	Balance      string `json:"balance"`
-	FrozenAmount string `json:"frozenAmount"`
-	Available    string `json:"available"`
-	Status       string `json:"status"`
-}
-
-type Plan struct {
-	ID            string         `json:"id"`
-	Code          string         `json:"code"`
-	Name          string         `json:"name"`
-	Audience      string         `json:"audience"`
-	VersionID     string         `json:"versionId"`
-	Version       int            `json:"version"`
-	BillingPeriod string         `json:"billingPeriod"`
-	Price         string         `json:"price"`
-	Currency      string         `json:"currency"`
-	Benefits      map[string]any `json:"benefits"`
-}
-
-type Entitlement struct {
-	Key       string    `json:"key"`
-	Limit     string    `json:"limit"`
-	Used      string    `json:"used"`
-	Reserved  string    `json:"reserved"`
-	PeriodEnd time.Time `json:"periodEnd"`
-}
-
-type Subscription struct {
-	ID                 string        `json:"id"`
-	PlanCode           string        `json:"planCode"`
-	PlanName           string        `json:"planName"`
-	Status             string        `json:"status"`
-	CurrentPeriodStart time.Time     `json:"currentPeriodStart"`
-	CurrentPeriodEnd   time.Time     `json:"currentPeriodEnd"`
-	CancelAtPeriodEnd  bool          `json:"cancelAtPeriodEnd"`
-	Entitlements       []Entitlement `json:"entitlements"`
-}
-
-type LedgerEntry struct {
-	ID           string         `json:"id"`
-	EntryType    string         `json:"entryType"`
-	Amount       string         `json:"amount"`
-	BalanceAfter string         `json:"balanceAfter"`
-	FrozenAfter  string         `json:"frozenAfter"`
-	BusinessType string         `json:"businessType"`
-	BusinessID   *string        `json:"businessId,omitempty"`
-	Metadata     map[string]any `json:"metadata"`
-	CreatedAt    time.Time      `json:"createdAt"`
-}
-
-type CostSummaryItem struct {
-	CostType string `json:"costType"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	Amount   string `json:"amount"`
-	Currency string `json:"currency"`
-}
-
-type ReconciliationReport struct {
-	SucceededRunsMissingUsage int64 `json:"succeededRunsMissingUsage"`
-	ReservationsAwaitingUsage int64 `json:"reservationsAwaitingUsage"`
-	ReservationsInReview      int64 `json:"reservationsInReview"`
-	UsageMissingCost          int64 `json:"usageMissingCost"`
-}
-
-type Reservation struct {
-	AccountID     string
-	ReservationID string
-	Reserved      string
-}
-
-type AdjustmentInput struct {
-	Amount         string `json:"amount" binding:"required"`
-	IdempotencyKey string `json:"idempotencyKey" binding:"required,min=8,max=128"`
-	Reason         string `json:"reason" binding:"required,min=2,max=255"`
-}
-
-// NewService 创建计费领域服务。
-func NewService(db *pgxpool.Pool) *Service { return &Service{db: db} }
+// NewBillingService 创建计费领域服务。
+func NewBillingService(db *pgxpool.Pool) *BillingService { return &BillingService{db: db} }
 
 // ProvisionAccount 在调用方事务中创建钱包、初始赠送流水、免费订阅和权益计数器。
 // 这些记录必须原子落库，避免出现账户已经可见但没有期初流水的情况；钱包流水是余额变更的审计依据。
@@ -179,7 +98,7 @@ func ProvisionAccount(ctx context.Context, tx pgx.Tx, tenantID, subjectType, sub
 }
 
 // CurrentAccount 按当前租户类型解析并返回实际承担费用的计费账户。
-func (s *Service) CurrentAccount(ctx context.Context, tenantID, userID string) (Account, error) {
+func (s *BillingService) CurrentAccount(ctx context.Context, tenantID, userID string) (Account, error) {
 	var item Account
 	// 个人空间由用户账户付费，企业空间则共用租户账户。所有计费入口必须遵循同一规则，
 	// 防止切换租户后仍错误扣减之前的个人钱包。
@@ -200,7 +119,7 @@ func (s *Service) CurrentAccount(ctx context.Context, tenantID, userID string) (
 }
 
 // ListPlans 返回适用于当前租户类型且当前生效的套餐版本。
-func (s *Service) ListPlans(ctx context.Context, tenantID string) ([]Plan, error) {
+func (s *BillingService) ListPlans(ctx context.Context, tenantID string) ([]Plan, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT p.id::text,p.code,p.name,p.audience,pv.id::text,pv.version,
 		       pv.billing_period,pv.price::text,pv.currency,pv.benefits
@@ -234,7 +153,7 @@ func (s *Service) ListPlans(ctx context.Context, tenantID string) ([]Plan, error
 }
 
 // CurrentSubscription 返回当前计费主体的有效订阅及本周期权益使用情况。
-func (s *Service) CurrentSubscription(ctx context.Context, tenantID, userID string) (Subscription, error) {
+func (s *BillingService) CurrentSubscription(ctx context.Context, tenantID, userID string) (Subscription, error) {
 	var item Subscription
 	err := s.db.QueryRow(ctx, `
 		SELECT s.id::text,p.code,p.name,s.status,s.current_period_start,s.current_period_end,s.cancel_at_period_end
@@ -280,7 +199,7 @@ func (s *Service) CurrentSubscription(ctx context.Context, tenantID, userID stri
 }
 
 // ListLedger 按时间倒序返回当前计费主体的钱包流水，最大返回 100 条。
-func (s *Service) ListLedger(ctx context.Context, tenantID, userID string, limit int) ([]LedgerEntry, error) {
+func (s *BillingService) ListLedger(ctx context.Context, tenantID, userID string, limit int) ([]LedgerEntry, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -313,7 +232,7 @@ func (s *Service) ListLedger(ctx context.Context, tenantID, userID string, limit
 }
 
 // Reserve 为一次智能体运行冻结额度，并记录预占单和不可变钱包流水。
-func (s *Service) Reserve(ctx context.Context, tx pgx.Tx, tenantID, userID, runID string) (Reservation, error) {
+func (s *BillingService) Reserve(ctx context.Context, tx pgx.Tx, tenantID, userID, runID string) (Reservation, error) {
 	var accountID, walletID string
 	if err := tx.QueryRow(ctx, `
 		SELECT b.id::text,w.id::text
@@ -384,13 +303,13 @@ func (s *Service) Reserve(ctx context.Context, tx pgx.Tx, tenantID, userID, runI
 }
 
 // Release 释放未结算的运行预占额度；重复释放按成功处理，保证调用幂等。
-func (s *Service) Release(ctx context.Context, runID, reason string) error {
+func (s *BillingService) Release(ctx context.Context, runID, reason string) error {
 	// SERIALIZABLE 隔离级别配合行锁，使释放与结算互斥，避免同一笔预占被同时处理。
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var reservationID, tenantID, accountID, walletID, reserved string
 	err = tx.QueryRow(ctx, `
 		SELECT r.id::text,r.tenant_id::text,r.billing_account_id::text,w.id::text,r.reserved_amount::text
@@ -429,7 +348,7 @@ func (s *Service) Release(ctx context.Context, runID, reason string) error {
 }
 
 // Settle 根据实际 Token 用量结算运行费用，并将预占转换为正式消费流水。
-func (s *Service) Settle(ctx context.Context, runID string, usage map[string]any) error {
+func (s *BillingService) Settle(ctx context.Context, runID string, usage map[string]any) error {
 	inputTokens, outputTokens, totalTokens := UsageTokenCounts(usage)
 	if totalTokens == 0 {
 		// 缺失用量不代表本次请求免费。保留冻结额度并进入待对账状态，
@@ -444,7 +363,7 @@ func (s *Service) Settle(ctx context.Context, runID string, usage map[string]any
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var reservationID, tenantID, accountID, walletID, reserved, priceVersionID string
 	var pricing []byte
 	// 同时锁定预占单和钱包，避免结算、取消释放、人工调账读写到中间状态。
@@ -513,7 +432,7 @@ func (s *Service) Settle(ctx context.Context, runID string, usage map[string]any
 }
 
 // Adjust 执行平台管理员人工调账，并以幂等键记录操作原因和操作者。
-func (s *Service) Adjust(ctx context.Context, tenantID, accountID, actorUserID string, input AdjustmentInput) (Account, error) {
+func (s *BillingService) Adjust(ctx context.Context, tenantID, accountID, actorUserID string, input AdjustmentInput) (Account, error) {
 	amount, ok := new(big.Rat).SetString(input.Amount)
 	if !ok || amount.Sign() == 0 {
 		return Account{}, ErrInvalidAmount
@@ -522,7 +441,7 @@ func (s *Service) Adjust(ctx context.Context, tenantID, accountID, actorUserID s
 	if err != nil {
 		return Account{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var walletID, subjectType, currency, status, balanceAfter, frozenAfter, available string
 	// 负向调账只能扣减未冻结额度。运行中的任务仍需要使用已预占额度完成结算，
 	// 因此人工调账后余额不得低于冻结金额。
@@ -557,12 +476,12 @@ func (s *Service) Adjust(ctx context.Context, tenantID, accountID, actorUserID s
 }
 
 // RecordProviderCost 按模型价格版本记录本次调用产生的上游供应商成本。
-func (s *Service) RecordProviderCost(ctx context.Context, tenantID, runID, usageRecordID string, usage map[string]any) error {
+func (s *BillingService) RecordProviderCost(ctx context.Context, tenantID, runID, usageRecordID string, usage map[string]any) error {
 	// 供应商成本与客户 Credit 消费分账记录。即使产品额度与上游货币使用不同单位或
 	// 定价方式，也能据此计算真实毛利。
 	provider := firstString(usage, "provider", "model_provider")
-	model := firstString(usage, "model", "model_name")
-	if provider == "" || model == "" {
+	modelName := firstString(usage, "model", "model_name")
+	if provider == "" || modelName == "" {
 		return nil
 	}
 	inputTokens, outputTokens, _ := UsageTokenCounts(usage)
@@ -577,7 +496,7 @@ func (s *Service) RecordProviderCost(ctx context.Context, tenantID, runID, usage
 		  AND mpv.status='active' AND mpv.effective_at<=NOW()
 		  AND (mpv.expires_at IS NULL OR mpv.expires_at>NOW())
 		ORDER BY (p.tenant_id IS NOT NULL) DESC,mpv.version DESC LIMIT 1
-	`, tenantID, provider, model).Scan(&priceVersionID, &inputRateText, &outputRateText, &currency)
+	`, tenantID, provider, modelName).Scan(&priceVersionID, &inputRateText, &outputRateText, &currency)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -608,7 +527,7 @@ func (s *Service) RecordProviderCost(ctx context.Context, tenantID, runID, usage
 				id,tenant_id,run_id,usage_record_id,cost_type,provider,model,quantity,unit_price,amount,currency,price_version_id,source_snapshot
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 			ON CONFLICT (usage_record_id,cost_type) DO NOTHING
-		`, id, tenantID, runID, usageRecordID, entry.costType, provider, model, entry.quantity, entry.rate.FloatString(10), entry.amount.FloatString(10), currency, priceVersionID, snapshot); err != nil {
+		`, id, tenantID, runID, usageRecordID, entry.costType, provider, modelName, entry.quantity, entry.rate.FloatString(10), entry.amount.FloatString(10), currency, priceVersionID, snapshot); err != nil {
 			return err
 		}
 	}
@@ -616,7 +535,7 @@ func (s *Service) RecordProviderCost(ctx context.Context, tenantID, runID, usage
 }
 
 // CostSummary 按成本类型、供应商和模型汇总指定时间区间的上游成本。
-func (s *Service) CostSummary(ctx context.Context, tenantID string, from, to time.Time) ([]CostSummaryItem, error) {
+func (s *BillingService) CostSummary(ctx context.Context, tenantID string, from, to time.Time) ([]CostSummaryItem, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT cost_type,COALESCE(provider,''),COALESCE(model,''),SUM(amount)::text,currency
 		FROM cost_entries WHERE tenant_id=$1 AND created_at>=$2 AND created_at<$3
@@ -638,7 +557,7 @@ func (s *Service) CostSummary(ctx context.Context, tenantID string, from, to tim
 }
 
 // Reconcile 扫描运行、用量、预占和成本之间的不一致，并持久化对账报告。
-func (s *Service) Reconcile(ctx context.Context, tenantID string) (ReconciliationReport, error) {
+func (s *BillingService) Reconcile(ctx context.Context, tenantID string) (ReconciliationReport, error) {
 	// 对账只识别异常并生成报告，不猜测缺失用量，也不自动移动资金，
 	// 避免错误数据触发不可逆的账务调整。
 	var report ReconciliationReport
@@ -668,35 +587,8 @@ func (s *Service) Reconcile(ctx context.Context, tenantID string) (Reconciliatio
 
 // UsageTokenCounts 兼容 Dify 和不同模型供应商的字段名，统一提取输入、输出和总 Token 数。
 func UsageTokenCounts(usage map[string]any) (input, output, total int64) {
-	// 结算和供应商成本必须共用同一套字段归一规则，避免两套口径产生差异。
-	input = firstInt(usage, "prompt_tokens", "input_tokens")
-	output = firstInt(usage, "completion_tokens", "output_tokens")
-	total = firstInt(usage, "total_tokens")
-	if total == 0 {
-		total = input + output
-	}
-	return
-}
-
-// firstInt 按字段优先级读取第一个可转换为整数的值。
-func firstInt(values map[string]any, keys ...string) int64 {
-	for _, key := range keys {
-		switch value := values[key].(type) {
-		case float64:
-			return int64(value)
-		case int:
-			return int64(value)
-		case int64:
-			return value
-		case json.Number:
-			parsed, _ := value.Int64()
-			return parsed
-		case string:
-			parsed, _ := strconv.ParseInt(value, 10, 64)
-			return parsed
-		}
-	}
-	return 0
+	// 结算和执行用量落库共用同一套字段归一规则，避免模块间出现统计口径差异。
+	return usageutil.TokenCounts(usage)
 }
 
 // firstString 按字段优先级读取第一个非空字符串。

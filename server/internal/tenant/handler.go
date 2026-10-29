@@ -4,19 +4,21 @@ import (
 	"errors"
 	"strings"
 
-	"gin-dify-saas/server/internal/platform/httpx"
-	"gin-dify-saas/server/internal/platform/requestctx"
+	"gin-dify-saas/server/internal/transport/httpx"
+	"gin-dify-saas/server/internal/transport/requestctx"
 
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct{ service *Service }
+type TenantHandler struct{ service *TenantService }
 
-// NewHandler 创建租户与成员管理接口处理器。
-func NewHandler(service *Service) *Handler { return &Handler{service: service} }
+// NewTenantHandler 创建租户与成员管理接口处理器。
+func NewTenantHandler(service *TenantService) *TenantHandler {
+	return &TenantHandler{service: service}
+}
 
 // Register 处理多租户模式的公开注册请求。
-func (h *Handler) Register(c *gin.Context) {
+func (h *TenantHandler) Register(c *gin.Context) {
 	var input RegisterInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		httpx.Error(c, 400, 14600, "invalid registration input")
@@ -30,7 +32,7 @@ func (h *Handler) Register(c *gin.Context) {
 }
 
 // List 返回当前用户加入的租户列表。
-func (h *Handler) List(c *gin.Context) {
+func (h *TenantHandler) List(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	items, err := h.service.List(c.Request.Context(), current.UserID, current.TenantID)
 	if h.writeError(c, err) {
@@ -40,9 +42,9 @@ func (h *Handler) List(c *gin.Context) {
 }
 
 // Create 创建新的企业租户空间。
-func (h *Handler) Create(c *gin.Context) {
+func (h *TenantHandler) Create(c *gin.Context) {
 	current, _ := requestctx.Get(c)
-	var input CreateInput
+	var input TenantCreateInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		httpx.Error(c, 400, 14601, "invalid tenant input")
 		return
@@ -55,7 +57,7 @@ func (h *Handler) Create(c *gin.Context) {
 }
 
 // Switch 切换当前租户并返回绑定目标租户的新访问令牌。
-func (h *Handler) Switch(c *gin.Context) {
+func (h *TenantHandler) Switch(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	result, err := h.service.Switch(c.Request.Context(), current.UserID, c.Param("id"))
 	if h.writeError(c, err) {
@@ -65,7 +67,7 @@ func (h *Handler) Switch(c *gin.Context) {
 }
 
 // Members 返回当前已切换租户的成员列表。
-func (h *Handler) Members(c *gin.Context) {
+func (h *TenantHandler) Members(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") {
 		httpx.Error(c, 403, 14603, "switch to this tenant before managing it")
@@ -79,7 +81,7 @@ func (h *Handler) Members(c *gin.Context) {
 }
 
 // Invite 由租户所有者或管理员邀请成员。
-func (h *Handler) Invite(c *gin.Context) {
+func (h *TenantHandler) Invite(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") || !hasAnyRole(current.Roles, "owner", "admin") {
 		httpx.Error(c, 403, 14603, "permission denied")
@@ -98,7 +100,7 @@ func (h *Handler) Invite(c *gin.Context) {
 }
 
 // AcceptInvitation 接受属于当前用户的有效邀请。
-func (h *Handler) AcceptInvitation(c *gin.Context) {
+func (h *TenantHandler) AcceptInvitation(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	var input struct {
 		Token string `json:"token" binding:"required,min=32,max=256"`
@@ -115,7 +117,7 @@ func (h *Handler) AcceptInvitation(c *gin.Context) {
 }
 
 // RemoveMember 按角色权限移除租户成员。
-func (h *Handler) RemoveMember(c *gin.Context) {
+func (h *TenantHandler) RemoveMember(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") || !hasAnyRole(current.Roles, "owner", "admin") {
 		httpx.Error(c, 403, 14603, "permission denied")
@@ -130,7 +132,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 }
 
 // Leave 处理当前用户退出租户请求。
-func (h *Handler) Leave(c *gin.Context) {
+func (h *TenantHandler) Leave(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") {
 		httpx.Error(c, 403, 14603, "switch to this tenant before leaving it")
@@ -143,7 +145,7 @@ func (h *Handler) Leave(c *gin.Context) {
 }
 
 // TransferOwnership 仅允许当前租户所有者转移所有权。
-func (h *Handler) TransferOwnership(c *gin.Context) {
+func (h *TenantHandler) TransferOwnership(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	if current.TenantID != c.Param("id") || !hasAnyRole(current.Roles, "owner") {
 		httpx.Error(c, 403, 14603, "only the owner can transfer ownership")
@@ -163,7 +165,7 @@ func (h *Handler) TransferOwnership(c *gin.Context) {
 }
 
 // writeError 将租户领域错误映射为稳定的 HTTP 状态和业务错误码。
-func (h *Handler) writeError(c *gin.Context, err error) bool {
+func (h *TenantHandler) writeError(c *gin.Context, err error) bool {
 	if err == nil {
 		return false
 	}
@@ -172,7 +174,7 @@ func (h *Handler) writeError(c *gin.Context, err error) bool {
 		httpx.Error(c, 409, 14609, err.Error())
 	case errors.Is(err, ErrConflict):
 		httpx.Error(c, 409, 14610, err.Error())
-	case errors.Is(err, ErrNotFound), errors.Is(err, ErrInvitation):
+	case errors.Is(err, ErrTenantNotFound), errors.Is(err, ErrInvitation):
 		httpx.Error(c, 404, 14604, err.Error())
 	case errors.Is(err, ErrForbidden), errors.Is(err, ErrOwnerMustTransfer):
 		httpx.Error(c, 403, 14603, err.Error())

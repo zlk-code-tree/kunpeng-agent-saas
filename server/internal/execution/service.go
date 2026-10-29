@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"gin-dify-saas/server/internal/billing"
 	"gin-dify-saas/server/internal/platform/ids"
 
 	"github.com/hibiken/asynq"
@@ -20,45 +19,19 @@ import (
 
 var ErrNotFound = errors.New("run not found")
 
-type Service struct {
+type ExecutionService struct {
 	db      *pgxpool.Pool
 	queue   *asynq.Client
-	billing *billing.Service
+	billing BillingPort
 }
 
-type CreateInput struct {
-	AgentVersionID string         `json:"agentVersionId" binding:"required,uuid"`
-	ConversationID string         `json:"conversationId"`
-	Query          string         `json:"query" binding:"required,min=1,max=20000"`
-	Inputs         map[string]any `json:"inputs"`
-}
-
-type Run struct {
-	ID             string         `json:"id"`
-	ConversationID string         `json:"conversationId,omitempty"`
-	Status         string         `json:"status"`
-	Input          map[string]any `json:"input"`
-	Output         map[string]any `json:"output,omitempty"`
-	ErrorCode      string         `json:"errorCode,omitempty"`
-	ErrorMessage   string         `json:"errorMessage,omitempty"`
-	CreatedAt      time.Time      `json:"createdAt"`
-	UpdatedAt      time.Time      `json:"updatedAt"`
-}
-
-type Event struct {
-	Sequence  int64          `json:"sequence"`
-	EventType string         `json:"eventType"`
-	Payload   map[string]any `json:"payload"`
-	CreatedAt time.Time      `json:"createdAt"`
-}
-
-// NewService 创建运行编排服务。
-func NewService(db *pgxpool.Pool, queue *asynq.Client, billingService *billing.Service) *Service {
-	return &Service{db: db, queue: queue, billing: billingService}
+// NewExecutionService 创建运行编排服务。
+func NewExecutionService(db *pgxpool.Pool, queue *asynq.Client, billingService BillingPort) *ExecutionService {
+	return &ExecutionService{db: db, queue: queue, billing: billingService}
 }
 
 // Create 原子创建会话消息、运行、额度预占、初始事件和 Outbox 事件。
-func (s *Service) Create(ctx context.Context, tenantID, userID, idempotencyKey string, input CreateInput) (Run, error) {
+func (s *ExecutionService) Create(ctx context.Context, tenantID, userID, idempotencyKey string, input ExecutionCreateInput) (Run, error) {
 	// 幂等键在数据库中按租户和用户隔离；请求哈希用于审计和排错。
 	// 客户端重试时返回已创建的运行，不能再次冻结额度。
 	if idempotencyKey == "" {
@@ -90,7 +63,7 @@ func (s *Service) Create(ctx context.Context, tenantID, userID, idempotencyKey s
 	if err != nil {
 		return Run{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent_versions WHERE id = $1 AND status = 'published')`, input.AgentVersionID).Scan(&exists); err != nil || !exists {
 		return Run{}, fmt.Errorf("agent version is not available")
@@ -128,12 +101,12 @@ func (s *Service) Create(ctx context.Context, tenantID, userID, idempotencyKey s
 	`, runID, tenantID, userID, conversationID, input.AgentVersionID, idempotencyKey, hex.EncodeToString(hash[:]), encoded)
 	if err != nil {
 		if isUniqueViolation(err) {
-			tx.Rollback(ctx)
+			_ = tx.Rollback(ctx)
 			return s.getByIdempotency(ctx, tenantID, userID, idempotencyKey)
 		}
 		return Run{}, fmt.Errorf("create run: %w", err)
 	}
-	if _, err := s.billing.Reserve(ctx, tx, tenantID, userID, runID); err != nil {
+	if err := s.billing.ReserveRun(ctx, tx, tenantID, userID, runID); err != nil {
 		return Run{}, fmt.Errorf("reserve run credits: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -168,7 +141,7 @@ func (s *Service) Create(ctx context.Context, tenantID, userID, idempotencyKey s
 }
 
 // Get 按租户和用户隔离读取一次运行及其输入输出。
-func (s *Service) Get(ctx context.Context, tenantID, userID, runID string) (Run, error) {
+func (s *ExecutionService) Get(ctx context.Context, tenantID, userID, runID string) (Run, error) {
 	var item Run
 	var input, output []byte
 	var conversationID, errorCode, errorMessage *string
@@ -199,7 +172,7 @@ func (s *Service) Get(ctx context.Context, tenantID, userID, runID string) (Run,
 }
 
 // Cancel 将可取消的运行更新为待取消状态。
-func (s *Service) Cancel(ctx context.Context, tenantID, userID, runID string) error {
+func (s *ExecutionService) Cancel(ctx context.Context, tenantID, userID, runID string) error {
 	// 取消只是状态请求，不直接写入终态。持有租约的 Worker 负责停止 Dify，
 	// 并根据是否已经产生用量决定结算还是释放预占。
 	result, err := s.db.Exec(ctx, `
@@ -216,7 +189,7 @@ func (s *Service) Cancel(ctx context.Context, tenantID, userID, runID string) er
 }
 
 // Events 从指定序号之后分页读取当前用户有权访问的运行事件。
-func (s *Service) Events(ctx context.Context, tenantID, userID, runID string, after int64) ([]Event, error) {
+func (s *ExecutionService) Events(ctx context.Context, tenantID, userID, runID string, after int64) ([]Event, error) {
 	var exists bool
 	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ai_runs WHERE id=$1 AND tenant_id=$2 AND user_id=$3)`, runID, tenantID, userID).Scan(&exists); err != nil || !exists {
 		return nil, ErrNotFound
@@ -243,7 +216,7 @@ func (s *Service) Events(ctx context.Context, tenantID, userID, runID string, af
 }
 
 // getByIdempotency 在创建请求发生唯一键冲突时返回已有运行。
-func (s *Service) getByIdempotency(ctx context.Context, tenantID, userID, key string) (Run, error) {
+func (s *ExecutionService) getByIdempotency(ctx context.Context, tenantID, userID, key string) (Run, error) {
 	var id string
 	if err := s.db.QueryRow(ctx, `SELECT id::text FROM ai_runs WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3`, tenantID, userID, key).Scan(&id); err != nil {
 		return Run{}, err

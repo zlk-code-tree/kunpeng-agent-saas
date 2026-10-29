@@ -3,22 +3,22 @@ package installation
 import (
 	"errors"
 
-	"gin-dify-saas/server/internal/platform/httpx"
+	"gin-dify-saas/server/internal/transport/httpx"
 
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct {
-	service *Service
+type InstallationHandler struct {
+	service *InstallationService
 }
 
-// NewHandler 创建平台安装接口处理器。
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+// NewInstallationHandler 创建平台安装接口处理器。
+func NewInstallationHandler(service *InstallationService) *InstallationHandler {
+	return &InstallationHandler{service: service}
 }
 
 // Status 返回平台当前安装状态和运行模式。
-func (h *Handler) Status(c *gin.Context) {
+func (h *InstallationHandler) Status(c *gin.Context) {
 	status, err := h.service.Status(c.Request.Context())
 	if err != nil {
 		httpx.Error(c, 500, 15001, "failed to load installation status")
@@ -28,7 +28,7 @@ func (h *Handler) Status(c *gin.Context) {
 }
 
 // Setup 处理一次性平台初始化请求。
-func (h *Handler) Setup(c *gin.Context) {
+func (h *InstallationHandler) Setup(c *gin.Context) {
 	var input SetupInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		httpx.Error(c, 400, 14001, err.Error())

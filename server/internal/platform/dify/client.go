@@ -73,7 +73,7 @@ func (c *Client) RunStreaming(ctx context.Context, input RunRequest, callback St
 		if readErr != nil {
 			return RunResult{}, fmt.Errorf("read Dify error response: %w", readErr)
 		}
-		return RunResult{}, fmt.Errorf("Dify returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
+		return RunResult{}, fmt.Errorf("dify returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
 	}
 
 	var result RunResult
@@ -107,7 +107,7 @@ func (c *Client) RunStreaming(ctx context.Context, input RunRequest, callback St
 			if message == "" {
 				message = "unknown streaming error"
 			}
-			return fmt.Errorf("Dify stream error %s: %s", event.Code, message)
+			return fmt.Errorf("dify stream error %s: %s", event.Code, message)
 		}
 		return nil
 	})
@@ -115,7 +115,7 @@ func (c *Client) RunStreaming(ctx context.Context, input RunRequest, callback St
 		return result, err
 	}
 	if !terminal {
-		return result, errors.New("Dify stream ended before a terminal event")
+		return result, errors.New("dify stream ended before a terminal event")
 	}
 	return result, nil
 }
@@ -139,7 +139,7 @@ func (c *Client) Stop(ctx context.Context, input RunRequest, taskID string) erro
 		return fmt.Errorf("read Dify stop response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("Dify stop returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
+		return fmt.Errorf("dify stop returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
 	}
 	return nil
 }
@@ -157,7 +157,7 @@ func (c *Client) Run(ctx context.Context, input RunRequest) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("read Dify response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return RunResult{}, fmt.Errorf("Dify returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
+		return RunResult{}, fmt.Errorf("dify returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
 	}
 	if input.AppType == "workflow" {
 		var response struct {

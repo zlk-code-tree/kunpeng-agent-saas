@@ -8,32 +8,33 @@ import (
 	"strconv"
 	"time"
 
-	"gin-dify-saas/server/internal/billing"
-	"gin-dify-saas/server/internal/platform/httpx"
-	"gin-dify-saas/server/internal/platform/requestctx"
+	"gin-dify-saas/server/internal/transport/httpx"
+	"gin-dify-saas/server/internal/transport/requestctx"
 
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct{ service *Service }
+type ExecutionHandler struct{ service *ExecutionService }
 
-// NewHandler 创建智能体运行接口处理器。
-func NewHandler(service *Service) *Handler { return &Handler{service: service} }
+// NewExecutionHandler 创建智能体运行接口处理器。
+func NewExecutionHandler(service *ExecutionService) *ExecutionHandler {
+	return &ExecutionHandler{service: service}
+}
 
 // Create 校验请求并创建一条异步智能体运行任务。
-func (h *Handler) Create(c *gin.Context) {
+func (h *ExecutionHandler) Create(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
-	var input CreateInput
+	var input ExecutionCreateInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		httpx.Error(c, 400, 14400, "invalid run input")
 		return
 	}
 	item, err := h.service.Create(c.Request.Context(), identity.TenantID, identity.UserID, c.GetHeader("Idempotency-Key"), input)
-	if errors.Is(err, billing.ErrInsufficientCredits) {
+	if errors.Is(err, ErrInsufficientCredits) {
 		httpx.Error(c, 402, 14402, err.Error())
 		return
 	}
-	if errors.Is(err, billing.ErrAccountNotFound) {
+	if errors.Is(err, ErrBillingAccountNotFound) {
 		httpx.Error(c, 409, 14403, err.Error())
 		return
 	}
@@ -45,7 +46,7 @@ func (h *Handler) Create(c *gin.Context) {
 }
 
 // Get 返回当前用户的一次运行详情。
-func (h *Handler) Get(c *gin.Context) {
+func (h *ExecutionHandler) Get(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	item, err := h.service.Get(c.Request.Context(), identity.TenantID, identity.UserID, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
@@ -60,7 +61,7 @@ func (h *Handler) Get(c *gin.Context) {
 }
 
 // Cancel 提交运行取消请求，最终停止和计费由 Worker 完成。
-func (h *Handler) Cancel(c *gin.Context) {
+func (h *ExecutionHandler) Cancel(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	err := h.service.Cancel(c.Request.Context(), identity.TenantID, identity.UserID, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
@@ -75,7 +76,7 @@ func (h *Handler) Cancel(c *gin.Context) {
 }
 
 // Events 通过 SSE 持续推送运行事件，直到任务进入终态或客户端断开连接。
-func (h *Handler) Events(c *gin.Context) {
+func (h *ExecutionHandler) Events(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	// Last-Event-ID 支持断线续传，避免重复发送客户端已经渲染的增量。
 	// 事件分批读取并逐条刷新，使代理和浏览器能在任务运行期间实时展示内容。
@@ -101,7 +102,7 @@ func (h *Handler) Events(c *gin.Context) {
 		}
 		for _, event := range events {
 			payload, _ := json.Marshal(event)
-			fmt.Fprintf(c.Writer, "id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, event.EventType, payload)
+			_, _ = fmt.Fprintf(c.Writer, "id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, event.EventType, payload)
 			after = event.Sequence
 			flusher.Flush()
 			if event.EventType == "run.succeeded" || event.EventType == "run.failed" || event.EventType == "run.stopped" {

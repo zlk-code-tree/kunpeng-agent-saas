@@ -8,10 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gin-dify-saas/server/internal/billing"
-	"gin-dify-saas/server/internal/integration/dify"
+	"gin-dify-saas/server/internal/platform/dify"
 	"gin-dify-saas/server/internal/platform/ids"
 	"gin-dify-saas/server/internal/platform/secretbox"
+	usageutil "gin-dify-saas/server/internal/platform/usage"
 
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,12 +23,12 @@ type Processor struct {
 	db       *pgxpool.Pool
 	box      *secretbox.Box
 	client   *dify.Client
-	billing  *billing.Service
+	billing  BillingPort
 	workerID string
 }
 
 // NewProcessor 创建运行任务处理器，并为当前 Worker 进程生成唯一租约所有者标识。
-func NewProcessor(db *pgxpool.Pool, box *secretbox.Box, client *dify.Client, billingService *billing.Service) *Processor {
+func NewProcessor(db *pgxpool.Pool, box *secretbox.Box, client *dify.Client, billingService BillingPort) *Processor {
 	// 进程级 owner id 用于区分当前 Worker、重启后的 Worker 和并发 Worker。
 	workerID, _ := ids.New()
 	return &Processor{db: db, box: box, client: client, billing: billingService, workerID: workerID}
@@ -218,9 +218,9 @@ func (p *Processor) HandleRun(ctx context.Context, task *asynq.Task) error {
 func (p *Processor) saveUsage(ctx context.Context, payload TaskPayload, usage map[string]any) (string, error) {
 	usageID, _ := ids.New()
 	usageJSON, _ := json.Marshal(usage)
-	inputTokens, outputTokens, totalTokens := billing.UsageTokenCounts(usage)
+	inputTokens, outputTokens, totalTokens := usageutil.TokenCounts(usage)
 	provider, _ := usage["provider"].(string)
-	model, _ := usage["model"].(string)
+	modelName, _ := usage["model"].(string)
 	// 每次运行只有一条权威 Dify 用量记录。Upsert 可安全处理流重试和迟到的终态事件，
 	// 供应商成本记录另有唯一约束防止重复生成。
 	err := p.db.QueryRow(ctx, `
@@ -232,7 +232,7 @@ func (p *Processor) saveUsage(ctx context.Context, payload TaskPayload, usage ma
 			output_tokens=EXCLUDED.output_tokens,total_tokens=EXCLUDED.total_tokens,
 			upstream_usage=EXCLUDED.upstream_usage
 		RETURNING id::text
-	`, usageID, payload.TenantID, payload.RunID, nullString(provider), nullString(model), inputTokens, outputTokens, totalTokens, usageJSON).Scan(&usageID)
+	`, usageID, payload.TenantID, payload.RunID, nullString(provider), nullString(modelName), inputTokens, outputTokens, totalTokens, usageJSON).Scan(&usageID)
 	if err != nil {
 		return "", err
 	}

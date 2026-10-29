@@ -8,29 +8,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Service struct {
+type AgentService struct {
 	db *pgxpool.Pool
 }
 
-type Item struct {
-	ID              string         `json:"id"`
-	AgentVersionID  string         `json:"agentVersionId"`
-	Name            string         `json:"name"`
-	Description     string         `json:"description"`
-	Category        string         `json:"category"`
-	Version         int            `json:"version"`
-	ParameterSchema map[string]any `json:"parameterSchema"`
-	Enabled         bool           `json:"enabled"`
-	Configured      bool           `json:"configured"`
-}
-
-// NewService 创建预置智能体查询服务。
-func NewService(db *pgxpool.Pool) *Service {
-	return &Service{db: db}
+// NewAgentService 创建预置智能体查询服务。
+func NewAgentService(db *pgxpool.Pool) *AgentService {
+	return &AgentService{db: db}
 }
 
 // List 返回当前租户可用的最新已发布智能体版本和配置状态。
-func (s *Service) List(ctx context.Context, tenantID string) ([]Item, error) {
+func (s *AgentService) List(ctx context.Context, tenantID string) ([]AgentItem, error) {
 	// 智能体模板全局共享，但启用状态和 Dify 绑定按租户隔离。
 	// 租户专属绑定优先于共享兜底绑定，与执行 Worker 的实际路由规则保持一致。
 	rows, err := s.db.Query(ctx, `
@@ -58,9 +46,9 @@ func (s *Service) List(ctx context.Context, tenantID string) ([]Item, error) {
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
 	defer rows.Close()
-	items := make([]Item, 0)
+	items := make([]AgentItem, 0)
 	for rows.Next() {
-		var item Item
+		var item AgentItem
 		var schema []byte
 		if err := rows.Scan(&item.ID, &item.AgentVersionID, &item.Name, &item.Description, &item.Category, &item.Version, &schema, &item.Enabled, &item.Configured); err != nil {
 			return nil, fmt.Errorf("scan agent: %w", err)

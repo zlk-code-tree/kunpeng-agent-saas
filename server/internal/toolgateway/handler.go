@@ -4,19 +4,21 @@ import (
 	"errors"
 	"strings"
 
-	"gin-dify-saas/server/internal/platform/httpx"
-	"gin-dify-saas/server/internal/platform/requestctx"
+	"gin-dify-saas/server/internal/transport/httpx"
+	"gin-dify-saas/server/internal/transport/requestctx"
 
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct{ service *Service }
+type ToolgatewayHandler struct{ service *ToolgatewayService }
 
-// NewHandler 创建受控工具目录、授权、票据和调用接口处理器。
-func NewHandler(service *Service) *Handler { return &Handler{service: service} }
+// NewToolgatewayHandler 创建受控工具目录、授权、票据和调用接口处理器。
+func NewToolgatewayHandler(service *ToolgatewayService) *ToolgatewayHandler {
+	return &ToolgatewayHandler{service: service}
+}
 
 // Create 创建新的平台工具及其首个版本。
-func (h *Handler) Create(c *gin.Context) {
+func (h *ToolgatewayHandler) Create(c *gin.Context) {
 	var input CreateToolInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		httpx.Error(c, 400, 14800, "invalid tool input")
@@ -31,7 +33,7 @@ func (h *Handler) Create(c *gin.Context) {
 }
 
 // List 返回工具目录的最新有效版本。
-func (h *Handler) List(c *gin.Context) {
+func (h *ToolgatewayHandler) List(c *gin.Context) {
 	items, err := h.service.ListTools(c.Request.Context())
 	if err != nil {
 		httpx.Error(c, 500, 15800, "failed to list tools")
@@ -41,7 +43,7 @@ func (h *Handler) List(c *gin.Context) {
 }
 
 // Grant 配置租户对工具的调用授权。
-func (h *Handler) Grant(c *gin.Context) {
+func (h *ToolgatewayHandler) Grant(c *gin.Context) {
 	var input GrantInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		httpx.Error(c, 400, 14802, "invalid tool grant")
@@ -55,7 +57,7 @@ func (h *Handler) Grant(c *gin.Context) {
 }
 
 // Ticket 为当前用户的一次运行签发短期工具调用票据。
-func (h *Handler) Ticket(c *gin.Context) {
+func (h *ToolgatewayHandler) Ticket(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	var input TicketInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -71,7 +73,7 @@ func (h *Handler) Ticket(c *gin.Context) {
 }
 
 // Invoke 使用运行绑定票据调用工具；该接口不依赖普通用户 JWT。
-func (h *Handler) Invoke(c *gin.Context) {
+func (h *ToolgatewayHandler) Invoke(c *gin.Context) {
 	ticket := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Tool "))
 	var input InvokeInput
 	if ticket == "" || c.ShouldBindJSON(&input) != nil {

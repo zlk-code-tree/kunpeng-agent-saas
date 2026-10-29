@@ -1,23 +1,23 @@
 package integration
 
 import (
-	"gin-dify-saas/server/internal/platform/httpx"
-	"gin-dify-saas/server/internal/platform/requestctx"
+	"gin-dify-saas/server/internal/transport/httpx"
+	"gin-dify-saas/server/internal/transport/requestctx"
 
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct {
-	service *Service
+type IntegrationHandler struct {
+	service *IntegrationService
 }
 
-// NewHandler 创建企业集成管理接口处理器。
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+// NewIntegrationHandler 创建企业集成管理接口处理器。
+func NewIntegrationHandler(service *IntegrationService) *IntegrationHandler {
+	return &IntegrationHandler{service: service}
 }
 
 // ListInstances 返回当前租户可见的 Dify 实例。
-func (h *Handler) ListInstances(c *gin.Context) {
+func (h *IntegrationHandler) ListInstances(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	items, err := h.service.ListInstances(c.Request.Context(), identity.TenantID)
 	if err != nil {
@@ -28,7 +28,7 @@ func (h *Handler) ListInstances(c *gin.Context) {
 }
 
 // CreateInstance 处理 Dify 实例创建请求。
-func (h *Handler) CreateInstance(c *gin.Context) {
+func (h *IntegrationHandler) CreateInstance(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	var input CreateInstanceInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -44,7 +44,7 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 }
 
 // BindApp 处理智能体版本与 Dify 应用绑定请求。
-func (h *Handler) BindApp(c *gin.Context) {
+func (h *IntegrationHandler) BindApp(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	var input BindAppInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -59,7 +59,7 @@ func (h *Handler) BindApp(c *gin.Context) {
 }
 
 // CheckInstance 立即检查指定 Dify 实例的健康状态。
-func (h *Handler) CheckInstance(c *gin.Context) {
+func (h *IntegrationHandler) CheckInstance(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	item, err := h.service.CheckInstance(c.Request.Context(), identity.TenantID, c.Param("id"))
 	if err != nil {
@@ -70,7 +70,7 @@ func (h *Handler) CheckInstance(c *gin.Context) {
 }
 
 // RotateInstanceCredential 处理 Dify 凭据轮换请求。
-func (h *Handler) RotateInstanceCredential(c *gin.Context) {
+func (h *IntegrationHandler) RotateInstanceCredential(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	var input RotateCredentialInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -85,7 +85,7 @@ func (h *Handler) RotateInstanceCredential(c *gin.Context) {
 }
 
 // CreateProvider 处理模型供应商创建请求。
-func (h *Handler) CreateProvider(c *gin.Context) {
+func (h *IntegrationHandler) CreateProvider(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	var input CreateProviderInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -101,7 +101,7 @@ func (h *Handler) CreateProvider(c *gin.Context) {
 }
 
 // ListProviders 返回当前租户可用的模型供应商。
-func (h *Handler) ListProviders(c *gin.Context) {
+func (h *IntegrationHandler) ListProviders(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	items, err := h.service.ListProviders(c.Request.Context(), identity.TenantID)
 	if err != nil {
@@ -112,7 +112,7 @@ func (h *Handler) ListProviders(c *gin.Context) {
 }
 
 // SetModelRoute 为智能体版本配置模型路由。
-func (h *Handler) SetModelRoute(c *gin.Context) {
+func (h *IntegrationHandler) SetModelRoute(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	var input SetModelRouteInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -127,7 +127,7 @@ func (h *Handler) SetModelRoute(c *gin.Context) {
 }
 
 // SetModelPrice 发布模型成本价格版本。
-func (h *Handler) SetModelPrice(c *gin.Context) {
+func (h *IntegrationHandler) SetModelPrice(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	var input SetModelPriceInput
 	if err := c.ShouldBindJSON(&input); err != nil {

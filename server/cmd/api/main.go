@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"gin-dify-saas/server/internal/app"
 	"gin-dify-saas/server/internal/config"
 	"gin-dify-saas/server/internal/platform/database"
-	appserver "gin-dify-saas/server/internal/server"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -37,13 +37,19 @@ func main() {
 	}
 
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.Redis.Addr, Password: cfg.Redis.Password, DB: cfg.Redis.DB})
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
+	api, err := app.NewAPI(cfg, db, redisClient)
+	if err != nil {
+		slog.Error("api application startup failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = api.Close() }()
 
 	// 流式响应可能持续较长时间，因此不设置全局 WriteTimeout；具体的上游调用
 	// 由 Dify 客户端自己的超时和请求上下文负责终止。
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           appserver.NewRouter(cfg, db, redisClient),
+		Handler:           api.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      0,

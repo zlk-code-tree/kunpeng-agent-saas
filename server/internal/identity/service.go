@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"gin-dify-saas/server/internal/platform/security"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
@@ -12,38 +14,18 @@ import (
 
 var ErrInvalidCredentials = errors.New("invalid username or password")
 
-type Service struct {
+type IdentityService struct {
 	db     *pgxpool.Pool
-	tokens *TokenManager
+	tokens *security.TokenManager
 }
 
-type LoginInput struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
-}
-
-type LoginResult struct {
-	AccessToken string `json:"accessToken"`
-}
-
-type UserInfo struct {
-	UserID   string   `json:"userId"`
-	Username string   `json:"username"`
-	RealName string   `json:"realName"`
-	Avatar   string   `json:"avatar"`
-	Roles    []string `json:"roles"`
-	Desc     string   `json:"desc"`
-	HomePath string   `json:"homePath"`
-	Token    string   `json:"token"`
-}
-
-// NewService 创建登录和用户信息服务。
-func NewService(db *pgxpool.Pool, tokens *TokenManager) *Service {
-	return &Service{db: db, tokens: tokens}
+// NewIdentityService 创建登录和用户信息服务。
+func NewIdentityService(db *pgxpool.Pool, tokens *security.TokenManager) *IdentityService {
+	return &IdentityService{db: db, tokens: tokens}
 }
 
 // Login 校验用户名和密码，并为默认租户或最早加入的租户签发访问令牌。
-func (s *Service) Login(ctx context.Context, input LoginInput) (LoginResult, error) {
+func (s *IdentityService) Login(ctx context.Context, input LoginInput) (LoginResult, error) {
 	// 多租户用户可能有多个成员关系。首次登录优先默认租户，否则选择最早加入的租户；
 	// 后续切换租户会在重新校验成员关系后签发新令牌。
 	var userID, username, passwordHash, displayName, installationID, tenantID, role string
@@ -74,7 +56,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (LoginResult, err
 }
 
 // UserInfo 返回 Vben 前端所需的当前用户资料和实时角色。
-func (s *Service) UserInfo(ctx context.Context, userID string, roles []string) (UserInfo, error) {
+func (s *IdentityService) UserInfo(ctx context.Context, userID string, roles []string) (UserInfo, error) {
 	var info UserInfo
 	err := s.db.QueryRow(ctx, `
 		SELECT id::text, username, display_name, COALESCE(avatar_url, '')

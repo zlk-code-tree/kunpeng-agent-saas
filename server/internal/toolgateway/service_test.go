@@ -37,8 +37,8 @@ func TestMCPInvocationUsesToolsCallEnvelope(t *testing.T) {
 		_, _ = response.Write([]byte(`{"jsonrpc":"2.0","result":{"content":"ok"}}`))
 	}))
 	defer upstream.Close()
-	service := &Service{httpClient: upstream.Client()}
-	result, err := service.call(context.Background(), "mcp_http", upstream.URL, http.MethodPost, nil, 1000, 4096, "weather", map[string]any{"city": "Shanghai"})
+	gateway := &ToolgatewayService{httpClient: upstream.Client()}
+	result, err := gateway.call(context.Background(), "mcp_http", upstream.URL, http.MethodPost, nil, 1000, 4096, "weather", map[string]any{"city": "Shanghai"})
 	if err != nil {
 		t.Fatalf("MCP invocation failed: %v", err)
 	}
@@ -56,20 +56,20 @@ func TestMCPInvocationUsesToolsCallEnvelope(t *testing.T) {
 
 // TestParseTicketRejectsTamperingAndExpiry 验证篡改和过期票据都会被拒绝。
 func TestParseTicketRejectsTamperingAndExpiry(t *testing.T) {
-	service := &Service{signingKey: []byte("a-signing-secret-that-is-long-enough")}
-	valid := signedTicket(t, string(service.signingKey), ticketClaims{
+	gateway := &ToolgatewayService{signingKey: []byte("a-signing-secret-that-is-long-enough")}
+	valid := signedTicket(t, string(gateway.signingKey), ticketClaims{
 		TenantID: "tenant", UserID: "user", RunID: "run", ToolCode: "weather", Expires: time.Now().Add(time.Minute).Unix(),
 	})
-	if _, err := service.parseTicket(valid); err != nil {
+	if _, err := gateway.parseTicket(valid); err != nil {
 		t.Fatalf("valid ticket rejected: %v", err)
 	}
-	if _, err := service.parseTicket(valid + "tampered"); err == nil {
+	if _, err := gateway.parseTicket(valid + "tampered"); err == nil {
 		t.Fatal("tampered ticket accepted")
 	}
-	expired := signedTicket(t, string(service.signingKey), ticketClaims{
+	expired := signedTicket(t, string(gateway.signingKey), ticketClaims{
 		TenantID: "tenant", UserID: "user", RunID: "run", ToolCode: "weather", Expires: time.Now().Add(-time.Minute).Unix(),
 	})
-	if _, err := service.parseTicket(expired); err == nil {
+	if _, err := gateway.parseTicket(expired); err == nil {
 		t.Fatal("expired ticket accepted")
 	}
 }

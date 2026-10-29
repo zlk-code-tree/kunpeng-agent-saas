@@ -15,87 +15,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Service struct {
+type IntegrationService struct {
 	db         *pgxpool.Pool
 	box        *secretbox.Box
 	httpClient *http.Client
 }
 
-type CreateInstanceInput struct {
-	Name           string `json:"name" binding:"required,min=2,max=100"`
-	BaseURL        string `json:"baseUrl" binding:"required,url"`
-	APIKey         string `json:"apiKey" binding:"required,min=8"`
-	DeploymentType string `json:"deploymentType" binding:"omitempty,oneof=shared dedicated"`
-}
-
-type BindAppInput struct {
-	AgentVersionID string `json:"agentVersionId" binding:"required,uuid"`
-	DifyInstanceID string `json:"difyInstanceId" binding:"required,uuid"`
-	UpstreamAppID  string `json:"upstreamAppId"`
-	APIKey         string `json:"apiKey" binding:"required,min=8"`
-}
-
-type Instance struct {
-	ID                  string     `json:"id"`
-	Name                string     `json:"name"`
-	BaseURL             string     `json:"baseUrl"`
-	Status              string     `json:"status"`
-	DeploymentType      string     `json:"deploymentType"`
-	HealthStatus        string     `json:"healthStatus"`
-	LastHealthCheckAt   *time.Time `json:"lastHealthCheckAt,omitempty"`
-	ConsecutiveFailures int        `json:"consecutiveFailures"`
-	CredentialVersion   int        `json:"credentialVersion"`
-	CreatedAt           time.Time  `json:"createdAt"`
-}
-
-type RotateCredentialInput struct {
-	APIKey string `json:"apiKey" binding:"required,min=8"`
-}
-
-type CreateProviderInput struct {
-	Code         string `json:"code" binding:"required,min=2,max=64"`
-	Name         string `json:"name" binding:"required,min=2,max=100"`
-	ProviderType string `json:"providerType" binding:"required,oneof=openai anthropic deepseek ollama vllm compatible"`
-	BaseURL      string `json:"baseUrl" binding:"required,url"`
-	APIKey       string `json:"apiKey"`
-	Shared       bool   `json:"shared"`
-}
-
-type Provider struct {
-	ID           string     `json:"id"`
-	Code         string     `json:"code"`
-	Name         string     `json:"name"`
-	ProviderType string     `json:"providerType"`
-	BaseURL      string     `json:"baseUrl"`
-	Status       string     `json:"status"`
-	Shared       bool       `json:"shared"`
-	HealthStatus string     `json:"healthStatus"`
-	LastHealthAt *time.Time `json:"lastHealthAt,omitempty"`
-	CreatedAt    time.Time  `json:"createdAt"`
-}
-
-type SetModelRouteInput struct {
-	AgentVersionID string         `json:"agentVersionId" binding:"required,uuid"`
-	ProviderID     string         `json:"providerId" binding:"required,uuid"`
-	Model          string         `json:"model" binding:"required,min=1,max=128"`
-	Priority       int            `json:"priority" binding:"omitempty,min=1,max=1000"`
-	Config         map[string]any `json:"config"`
-}
-
-type SetModelPriceInput struct {
-	Model         string `json:"model" binding:"required,min=1,max=128"`
-	InputPer1000  string `json:"inputPer1000" binding:"required"`
-	OutputPer1000 string `json:"outputPer1000" binding:"required"`
-	Currency      string `json:"currency" binding:"omitempty,max=16"`
-}
-
-// NewService 创建外部集成、模型供应商和 Dify 实例管理服务。
-func NewService(db *pgxpool.Pool, box *secretbox.Box) *Service {
-	return &Service{db: db, box: box, httpClient: &http.Client{Timeout: 10 * time.Second}}
+// NewIntegrationService 创建外部集成、模型供应商和 Dify 实例管理服务。
+func NewIntegrationService(db *pgxpool.Pool, box *secretbox.Box) *IntegrationService {
+	return &IntegrationService{db: db, box: box, httpClient: &http.Client{Timeout: 10 * time.Second}}
 }
 
 // CreateInstance 创建共享或租户独享的 Dify 实例，并加密保存管理凭据。
-func (s *Service) CreateInstance(ctx context.Context, tenantID string, input CreateInstanceInput) (Instance, error) {
+func (s *IntegrationService) CreateInstance(ctx context.Context, tenantID string, input CreateInstanceInput) (Instance, error) {
 	id, err := ids.New()
 	if err != nil {
 		return Instance{}, err
@@ -122,7 +54,7 @@ func (s *Service) CreateInstance(ctx context.Context, tenantID string, input Cre
 }
 
 // ListInstances 返回当前租户自有实例和平台共享实例。
-func (s *Service) ListInstances(ctx context.Context, tenantID string) ([]Instance, error) {
+func (s *IntegrationService) ListInstances(ctx context.Context, tenantID string) ([]Instance, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id::text,name,base_url,status,deployment_type,health_status,last_health_check_at,
 		       consecutive_failures,credential_version,created_at
@@ -146,7 +78,7 @@ func (s *Service) ListInstances(ctx context.Context, tenantID string) ([]Instanc
 }
 
 // CheckInstance 调用 Dify /info 接口检查连通性和凭据，并更新实例健康状态。
-func (s *Service) CheckInstance(ctx context.Context, tenantID, instanceID string) (Instance, error) {
+func (s *IntegrationService) CheckInstance(ctx context.Context, tenantID, instanceID string) (Instance, error) {
 	var item Instance
 	var encrypted []byte
 	err := s.db.QueryRow(ctx, `
@@ -197,7 +129,7 @@ func (s *Service) CheckInstance(ctx context.Context, tenantID, instanceID string
 }
 
 // CheckAll 批量检查全部有效 Dify 实例和模型供应商，供 Worker 定时任务调用。
-func (s *Service) CheckAll(ctx context.Context) (int, int) {
+func (s *IntegrationService) CheckAll(ctx context.Context) (int, int) {
 	// 先读取目标快照并关闭结果集，再执行慢速远程请求，避免长时间占用数据库连接。
 	rows, err := s.db.Query(ctx, `SELECT id::text,COALESCE(tenant_id::text,(SELECT default_tenant_id::text FROM installation_settings LIMIT 1)) FROM dify_instances WHERE status='active'`)
 	if err != nil {
@@ -259,7 +191,7 @@ func (s *Service) CheckAll(ctx context.Context) (int, int) {
 }
 
 // RotateInstanceCredential 原子替换租户 Dify 实例凭据并递增可审计的凭据版本。
-func (s *Service) RotateInstanceCredential(ctx context.Context, tenantID, instanceID, apiKey string) error {
+func (s *IntegrationService) RotateInstanceCredential(ctx context.Context, tenantID, instanceID, apiKey string) error {
 	encrypted, err := s.box.Seal(strings.TrimSpace(apiKey))
 	if err != nil {
 		return err
@@ -280,7 +212,7 @@ func (s *Service) RotateInstanceCredential(ctx context.Context, tenantID, instan
 }
 
 // CreateProvider 创建租户自有或平台共享的模型供应商，并加密保存 API Key。
-func (s *Service) CreateProvider(ctx context.Context, tenantID string, input CreateProviderInput) (Provider, error) {
+func (s *IntegrationService) CreateProvider(ctx context.Context, tenantID string, input CreateProviderInput) (Provider, error) {
 	id, _ := ids.New()
 	var encrypted []byte
 	var err error
@@ -304,7 +236,7 @@ func (s *Service) CreateProvider(ctx context.Context, tenantID string, input Cre
 }
 
 // ListProviders 返回当前租户可使用的自有和共享模型供应商。
-func (s *Service) ListProviders(ctx context.Context, tenantID string) ([]Provider, error) {
+func (s *IntegrationService) ListProviders(ctx context.Context, tenantID string) ([]Provider, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id::text,code,name,provider_type,base_url,status,is_shared,health_status,last_health_check_at,created_at
 		FROM model_providers WHERE tenant_id=$1 OR is_shared=TRUE ORDER BY created_at DESC
@@ -325,7 +257,7 @@ func (s *Service) ListProviders(ctx context.Context, tenantID string) ([]Provide
 }
 
 // SetModelRoute 为智能体版本增加一条按优先级选择的模型路由。
-func (s *Service) SetModelRoute(ctx context.Context, tenantID string, input SetModelRouteInput) error {
+func (s *IntegrationService) SetModelRoute(ctx context.Context, tenantID string, input SetModelRouteInput) error {
 	id, _ := ids.New()
 	priority := input.Priority
 	if priority == 0 {
@@ -348,7 +280,7 @@ func (s *Service) SetModelRoute(ctx context.Context, tenantID string, input SetM
 }
 
 // SetModelPrice 为指定供应商模型发布一个新的成本价格版本。
-func (s *Service) SetModelPrice(ctx context.Context, tenantID, providerID string, input SetModelPriceInput) error {
+func (s *IntegrationService) SetModelPrice(ctx context.Context, tenantID, providerID string, input SetModelPriceInput) error {
 	id, _ := ids.New()
 	currency := strings.ToUpper(strings.TrimSpace(input.Currency))
 	if currency == "" {
@@ -373,7 +305,7 @@ func (s *Service) SetModelPrice(ctx context.Context, tenantID, providerID string
 }
 
 // BindApp 将租户的智能体版本绑定到一个 Dify 应用，并替换旧的租户专属绑定。
-func (s *Service) BindApp(ctx context.Context, tenantID string, input BindAppInput) error {
+func (s *IntegrationService) BindApp(ctx context.Context, tenantID string, input BindAppInput) error {
 	id, err := ids.New()
 	if err != nil {
 		return err
@@ -386,7 +318,7 @@ func (s *Service) BindApp(ctx context.Context, tenantID string, input BindAppInp
 	if err != nil {
 		return fmt.Errorf("begin Dify app binding: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// 替换旧绑定和新增绑定在同一事务中完成，读取方始终只能看到一个有效租户绑定；
 	// 平台共享的兜底绑定不会被修改。
 	if _, err := tx.Exec(ctx, `

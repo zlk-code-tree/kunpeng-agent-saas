@@ -1,0 +1,38 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  # standard 集合 = errcheck、govet、ineffassign、staticcheck、unused
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+    - unconvert
+  settings:
+    errcheck:
+      check-type-assertions: true
+      # defer 中的资源关闭错误无需逐个处理
+      exclude-functions:
+        - (io.Closer).Close
+  exclusions:
+    generated: lax
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - gin-dify-saas/server
+  exclusions:
+    generated: lax

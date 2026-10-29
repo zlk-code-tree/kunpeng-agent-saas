@@ -11,9 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"gin-dify-saas/server/internal/billing"
-	"gin-dify-saas/server/internal/identity"
 	"gin-dify-saas/server/internal/platform/ids"
+	"gin-dify-saas/server/internal/platform/security"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -26,77 +25,24 @@ var (
 	ErrForbidden         = errors.New("tenant operation is forbidden")
 	ErrInvitation        = errors.New("invitation is invalid or expired")
 	ErrMultiModeOnly     = errors.New("operation requires multi-tenant mode")
-	ErrNotFound          = errors.New("tenant resource not found")
+	ErrTenantNotFound    = errors.New("tenant resource not found")
 	ErrOwnerMustTransfer = errors.New("tenant owner must transfer ownership before leaving")
 )
 
-type Service struct {
+type TenantService struct {
 	db             *pgxpool.Pool
-	tokens         *identity.TokenManager
+	tokens         *security.TokenManager
+	accounts       AccountProvisioner
 	configuredMode string
 }
 
-type Item struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	Role      string    `json:"role"`
-	Status    string    `json:"status"`
-	Current   bool      `json:"current"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
-type Member struct {
-	UserID      string    `json:"userId"`
-	Username    string    `json:"username"`
-	DisplayName string    `json:"displayName"`
-	Role        string    `json:"role"`
-	Status      string    `json:"status"`
-	JoinedAt    time.Time `json:"joinedAt"`
-}
-
-type RegisterInput struct {
-	Username    string `json:"username" binding:"required,min=3,max=64"`
-	DisplayName string `json:"displayName" binding:"required,min=2,max=64"`
-	Password    string `json:"password" binding:"required,min=8,max=128"`
-}
-
-type RegisterResult struct {
-	AccessToken string `json:"accessToken"`
-	TenantID    string `json:"tenantId"`
-}
-
-type CreateInput struct {
-	Name string `json:"name" binding:"required,min=2,max=100"`
-}
-
-type SwitchResult struct {
-	AccessToken string `json:"accessToken"`
-	TenantID    string `json:"tenantId"`
-	Role        string `json:"role"`
-}
-
-type InviteInput struct {
-	Username string `json:"username" binding:"required,min=3,max=64"`
-	Role     string `json:"role" binding:"required,oneof=admin member finance"`
-}
-
-type Invitation struct {
-	ID        string    `json:"id"`
-	TenantID  string    `json:"tenantId"`
-	Username  string    `json:"username"`
-	Role      string    `json:"role"`
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expiresAt"`
-}
-
-// NewService 创建租户、成员和邀请管理服务。
-func NewService(db *pgxpool.Pool, tokens *identity.TokenManager, configuredMode string) *Service {
-	return &Service{db: db, tokens: tokens, configuredMode: configuredMode}
+// NewTenantService 创建租户、成员和邀请管理服务。
+func NewTenantService(db *pgxpool.Pool, tokens *security.TokenManager, accounts AccountProvisioner, configuredMode string) *TenantService {
+	return &TenantService{db: db, tokens: tokens, accounts: accounts, configuredMode: configuredMode}
 }
 
 // Register 在多租户模式下注册用户，并创建其个人空间、所有者成员关系和计费账户。
-func (s *Service) Register(ctx context.Context, input RegisterInput) (RegisterResult, error) {
+func (s *TenantService) Register(ctx context.Context, input RegisterInput) (RegisterResult, error) {
 	// 同时检查运行配置和数据库安装模式，防止配置错误的进程在单租户数据库上开放注册。
 	if s.configuredMode != "multi" {
 		return RegisterResult{}, ErrMultiModeOnly
@@ -125,7 +71,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (RegisterRe
 	if err != nil {
 		return RegisterResult{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO users (id, username, password_hash, display_name, status)
 		VALUES ($1,$2,$3,$4,'active')
@@ -144,7 +90,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (RegisterRe
 	`, membershipID, tenantID, userID); err != nil {
 		return RegisterResult{}, err
 	}
-	if _, err := billing.ProvisionAccount(ctx, tx, tenantID, "user", userID); err != nil {
+	if err := s.accounts.ProvisionAccount(ctx, tx, tenantID, "user", userID); err != nil {
 		return RegisterResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -158,7 +104,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (RegisterRe
 }
 
 // List 返回用户加入的所有有效租户，并标记当前令牌所选择的租户。
-func (s *Service) List(ctx context.Context, userID, currentTenantID string) ([]Item, error) {
+func (s *TenantService) List(ctx context.Context, userID, currentTenantID string) ([]TenantItem, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT t.id::text, t.name, t.type, tm.role, t.status, t.created_at
 		FROM tenant_members tm JOIN tenants t ON t.id=tm.tenant_id
@@ -169,9 +115,9 @@ func (s *Service) List(ctx context.Context, userID, currentTenantID string) ([]I
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]Item, 0)
+	items := make([]TenantItem, 0)
 	for rows.Next() {
-		var item Item
+		var item TenantItem
 		if err := rows.Scan(&item.ID, &item.Name, &item.Type, &item.Role, &item.Status, &item.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -182,46 +128,46 @@ func (s *Service) List(ctx context.Context, userID, currentTenantID string) ([]I
 }
 
 // Create 在多租户模式下创建企业空间、所有者成员关系和企业共享计费账户。
-func (s *Service) Create(ctx context.Context, userID string, input CreateInput) (Item, error) {
+func (s *TenantService) Create(ctx context.Context, userID string, input TenantCreateInput) (TenantItem, error) {
 	if s.configuredMode != "multi" {
-		return Item{}, ErrMultiModeOnly
+		return TenantItem{}, ErrMultiModeOnly
 	}
 	if err := s.ensureInstalledMulti(ctx); err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
 	tenantID, _ := ids.New()
 	membershipID, _ := ids.New()
-	item := Item{ID: tenantID, Name: strings.TrimSpace(input.Name), Type: "organization", Role: "owner", Status: "active", CreatedAt: time.Now().UTC()}
+	item := TenantItem{ID: tenantID, Name: strings.TrimSpace(input.Name), Type: "organization", Role: "owner", Status: "active", CreatedAt: time.Now().UTC()}
 	// 企业计费归属租户而不是创建者，使企业成员共享额度，同时个人空间仍保留独立用户钱包。
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO tenants (id, type, name, slug, status) VALUES ($1,'organization',$2,$3,'active')
 	`, tenantID, item.Name, slug("org", tenantID)); err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO tenant_members (id, tenant_id, user_id, role, status) VALUES ($1,$2,$3,'owner','active')
 	`, membershipID, tenantID, userID); err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
-	if _, err := billing.ProvisionAccount(ctx, tx, tenantID, "tenant", tenantID); err != nil {
-		return Item{}, err
+	if err := s.accounts.ProvisionAccount(ctx, tx, tenantID, "tenant", tenantID); err != nil {
+		return TenantItem{}, err
 	}
 	if err := insertAudit(ctx, tx, tenantID, userID, "tenant.create", "tenant", tenantID, map[string]any{"name": item.Name}); err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
 	return item, nil
 }
 
 // Switch 校验实时成员关系后，为目标租户签发新的访问令牌。
-func (s *Service) Switch(ctx context.Context, userID, tenantID string) (SwitchResult, error) {
+func (s *TenantService) Switch(ctx context.Context, userID, tenantID string) (SwitchResult, error) {
 	// 旧令牌不能直接授权租户切换；必须重新读取有效用户、租户和成员角色。
 	var installationID, username, role string
 	err := s.db.QueryRow(ctx, `
@@ -233,7 +179,7 @@ func (s *Service) Switch(ctx context.Context, userID, tenantID string) (SwitchRe
 		WHERE u.id=$1 AND u.status='active'
 	`, userID, tenantID).Scan(&installationID, &username, &role)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return SwitchResult{}, ErrNotFound
+		return SwitchResult{}, ErrTenantNotFound
 	}
 	if err != nil {
 		return SwitchResult{}, err
@@ -246,7 +192,7 @@ func (s *Service) Switch(ctx context.Context, userID, tenantID string) (SwitchRe
 }
 
 // Members 按角色优先级返回租户当前有效成员。
-func (s *Service) Members(ctx context.Context, tenantID string) ([]Member, error) {
+func (s *TenantService) Members(ctx context.Context, tenantID string) ([]Member, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT u.id::text, u.username, u.display_name, tm.role, tm.status, tm.created_at
 		FROM tenant_members tm JOIN users u ON u.id=tm.user_id
@@ -269,10 +215,10 @@ func (s *Service) Members(ctx context.Context, tenantID string) ([]Member, error
 }
 
 // Invite 为已注册用户创建限时租户邀请，并返回仅展示一次的原始令牌。
-func (s *Service) Invite(ctx context.Context, tenantID, actorUserID string, input InviteInput) (Invitation, error) {
+func (s *TenantService) Invite(ctx context.Context, tenantID, actorUserID string, input InviteInput) (Invitation, error) {
 	var targetUserID, username string
 	if err := s.db.QueryRow(ctx, `SELECT id::text, username FROM users WHERE username=$1 AND status='active'`, strings.ToLower(strings.TrimSpace(input.Username))).Scan(&targetUserID, &username); errors.Is(err, pgx.ErrNoRows) {
-		return Invitation{}, ErrNotFound
+		return Invitation{}, ErrTenantNotFound
 	} else if err != nil {
 		return Invitation{}, err
 	}
@@ -305,13 +251,13 @@ func (s *Service) Invite(ctx context.Context, tenantID, actorUserID string, inpu
 }
 
 // AcceptInvitation 原子消费邀请并创建或恢复用户的租户成员关系。
-func (s *Service) AcceptInvitation(ctx context.Context, userID, token string) (Item, error) {
+func (s *TenantService) AcceptInvitation(ctx context.Context, userID, token string) (TenantItem, error) {
 	tokenHash := hashToken(strings.TrimSpace(token))
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var invitationID, tenantID, role string
 	var expiresAt time.Time
 	// 锁定待处理邀请，防止并发请求重复接受；成员关系使用 Upsert，支持重新邀请已退出用户。
@@ -322,14 +268,14 @@ func (s *Service) AcceptInvitation(ctx context.Context, userID, token string) (I
 		FOR UPDATE
 	`, tokenHash, userID).Scan(&invitationID, &tenantID, &role, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Item{}, ErrInvitation
+		return TenantItem{}, ErrInvitation
 	}
 	if err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
 	if time.Now().After(expiresAt) {
 		_, _ = tx.Exec(ctx, `UPDATE tenant_invitations SET status='expired', updated_at=NOW() WHERE id=$1`, invitationID)
-		return Item{}, ErrInvitation
+		return TenantItem{}, ErrInvitation
 	}
 	membershipID, _ := ids.New()
 	if _, err := tx.Exec(ctx, `
@@ -337,29 +283,29 @@ func (s *Service) AcceptInvitation(ctx context.Context, userID, token string) (I
 		VALUES ($1,$2,$3,$4,'active')
 		ON CONFLICT (tenant_id, user_id) DO UPDATE SET role=EXCLUDED.role, status='active', updated_at=NOW()
 	`, membershipID, tenantID, userID, role); err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE tenant_invitations SET status='accepted', accepted_at=NOW(), updated_at=NOW() WHERE id=$1`, invitationID); err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
-	var item Item
+	var item TenantItem
 	if err := s.db.QueryRow(ctx, `SELECT id::text,name,type,$2,status,created_at FROM tenants WHERE id=$1 AND status='active'`, tenantID, role).Scan(&item.ID, &item.Name, &item.Type, &item.Role, &item.Status, &item.CreatedAt); err != nil {
-		return Item{}, err
+		return TenantItem{}, err
 	}
 	return item, nil
 }
 
 // RemoveMember 按租户角色规则移除目标成员。
-func (s *Service) RemoveMember(ctx context.Context, tenantID, actorUserID, actorRole, targetUserID string) error {
+func (s *TenantService) RemoveMember(ctx context.Context, tenantID, actorUserID, actorRole, targetUserID string) error {
 	if actorUserID == targetUserID {
 		return ErrForbidden
 	}
 	var targetRole string
 	if err := s.db.QueryRow(ctx, `SELECT role FROM tenant_members WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, tenantID, targetUserID).Scan(&targetRole); errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
+		return ErrTenantNotFound
 	} else if err != nil {
 		return err
 	}
@@ -372,16 +318,16 @@ func (s *Service) RemoveMember(ctx context.Context, tenantID, actorUserID, actor
 		return err
 	}
 	if result.RowsAffected() == 0 {
-		return ErrNotFound
+		return ErrTenantNotFound
 	}
 	return nil
 }
 
 // Leave 让普通成员退出租户；所有者必须先完成所有权转移。
-func (s *Service) Leave(ctx context.Context, tenantID, userID string) error {
+func (s *TenantService) Leave(ctx context.Context, tenantID, userID string) error {
 	var role string
 	if err := s.db.QueryRow(ctx, `SELECT role FROM tenant_members WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, tenantID, userID).Scan(&role); errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
+		return ErrTenantNotFound
 	} else if err != nil {
 		return err
 	}
@@ -393,7 +339,7 @@ func (s *Service) Leave(ctx context.Context, tenantID, userID string) error {
 }
 
 // TransferOwnership 原子地把租户所有权从当前所有者转移给目标成员。
-func (s *Service) TransferOwnership(ctx context.Context, tenantID, ownerUserID, targetUserID string) error {
+func (s *TenantService) TransferOwnership(ctx context.Context, tenantID, ownerUserID, targetUserID string) error {
 	if ownerUserID == targetUserID {
 		return ErrConflict
 	}
@@ -402,10 +348,10 @@ func (s *Service) TransferOwnership(ctx context.Context, tenantID, ownerUserID, 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var targetRole string
 	if err := tx.QueryRow(ctx, `SELECT role FROM tenant_members WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR UPDATE`, tenantID, targetUserID).Scan(&targetRole); errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
+		return ErrTenantNotFound
 	} else if err != nil {
 		return err
 	}
@@ -422,7 +368,7 @@ func (s *Service) TransferOwnership(ctx context.Context, tenantID, ownerUserID, 
 }
 
 // ensureInstalledMulti 校验数据库持久化的安装模式确实为多租户。
-func (s *Service) ensureInstalledMulti(ctx context.Context) error {
+func (s *TenantService) ensureInstalledMulti(ctx context.Context) error {
 	var mode string
 	if err := s.db.QueryRow(ctx, `SELECT mode FROM installation_settings LIMIT 1`).Scan(&mode); err != nil {
 		return err

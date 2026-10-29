@@ -28,7 +28,7 @@ func (c *Client) CreateDataset(ctx context.Context, baseURL, apiKey, name string
 	defer resp.Body.Close()
 	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("Dify dataset API returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
+		return "", fmt.Errorf("dify dataset API returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
 	}
 	var response struct {
 		ID string `json:"id"`
@@ -37,7 +37,7 @@ func (c *Client) CreateDataset(ctx context.Context, baseURL, apiKey, name string
 		return "", err
 	}
 	if response.ID == "" {
-		return "", fmt.Errorf("Dify dataset response has no id")
+		return "", fmt.Errorf("dify dataset response has no id")
 	}
 	return response.ID, nil
 }
@@ -80,7 +80,7 @@ func (c *Client) UploadDocument(ctx context.Context, baseURL, apiKey, datasetID,
 	defer resp.Body.Close()
 	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("Dify document API returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
+		return "", "", fmt.Errorf("dify document API returned %d: %s", resp.StatusCode, truncate(string(responseBody), 500))
 	}
 	var response struct {
 		Batch    string `json:"batch"`

@@ -29,52 +29,12 @@ var (
 	ErrInvalidTicket = errors.New("invalid or expired tool ticket")
 )
 
-type Service struct {
+type ToolgatewayService struct {
 	db           *pgxpool.Pool
 	box          *secretbox.Box
 	signingKey   []byte
 	allowPrivate bool
 	httpClient   *http.Client
-}
-
-type CreateToolInput struct {
-	Code             string         `json:"code" binding:"required,min=2,max=64"`
-	Name             string         `json:"name" binding:"required,min=2,max=100"`
-	Description      string         `json:"description"`
-	Protocol         string         `json:"protocol" binding:"required,oneof=http_json mcp_http"`
-	Endpoint         string         `json:"endpoint" binding:"required,url"`
-	Method           string         `json:"method" binding:"omitempty,oneof=GET POST PUT PATCH"`
-	Credential       string         `json:"credential"`
-	InputSchema      map[string]any `json:"inputSchema"`
-	OutputSchema     map[string]any `json:"outputSchema"`
-	TimeoutMS        int            `json:"timeoutMs" binding:"omitempty,min=100,max=120000"`
-	MaxResponseBytes int            `json:"maxResponseBytes" binding:"omitempty,min=1024,max=10485760"`
-}
-
-type GrantInput struct {
-	TenantID               string   `json:"tenantId" binding:"required,uuid"`
-	AllowedAgentVersionIDs []string `json:"allowedAgentVersionIds"`
-	MaxCallsPerRun         int      `json:"maxCallsPerRun" binding:"omitempty,min=1,max=1000"`
-}
-
-type TicketInput struct {
-	ToolCode string `json:"toolCode" binding:"required,min=2,max=64"`
-}
-
-type InvokeInput struct {
-	Arguments map[string]any `json:"arguments"`
-}
-
-type Tool struct {
-	ID          string    `json:"id"`
-	Code        string    `json:"code"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Protocol    string    `json:"protocol"`
-	Status      string    `json:"status"`
-	Version     int       `json:"version"`
-	Endpoint    string    `json:"endpoint"`
-	CreatedAt   time.Time `json:"createdAt"`
 }
 
 type ticketClaims struct {
@@ -86,13 +46,13 @@ type ticketClaims struct {
 	Expires  int64  `json:"expires"`
 }
 
-// NewService 创建工具网关服务；allowPrivate 仅应在开发或可信内网环境开启。
-func NewService(db *pgxpool.Pool, box *secretbox.Box, signingSecret string, allowPrivate bool) *Service {
-	return &Service{db: db, box: box, signingKey: []byte(signingSecret), allowPrivate: allowPrivate, httpClient: &http.Client{Timeout: 2 * time.Minute}}
+// NewToolgatewayService 创建工具网关服务；allowPrivate 仅应在开发或可信内网环境开启。
+func NewToolgatewayService(db *pgxpool.Pool, box *secretbox.Box, signingSecret string, allowPrivate bool) *ToolgatewayService {
+	return &ToolgatewayService{db: db, box: box, signingKey: []byte(signingSecret), allowPrivate: allowPrivate, httpClient: &http.Client{Timeout: 2 * time.Minute}}
 }
 
 // CreateTool 创建工具目录项和首个不可变版本，并加密保存调用凭据。
-func (s *Service) CreateTool(ctx context.Context, input CreateToolInput) (Tool, error) {
+func (s *ToolgatewayService) CreateTool(ctx context.Context, input CreateToolInput) (Tool, error) {
 	// 入库前校验端点以阻止明显的 SSRF 目标。DNS 和网络路由可能在配置后变化，
 	// 因此真正调用时还会再次校验。
 	if err := validateEndpoint(ctx, input.Endpoint, s.allowPrivate); err != nil {
@@ -125,7 +85,7 @@ func (s *Service) CreateTool(ctx context.Context, input CreateToolInput) (Tool, 
 	if err != nil {
 		return Tool{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	item := Tool{ID: toolID, Code: strings.ToLower(strings.TrimSpace(input.Code)), Name: strings.TrimSpace(input.Name), Description: strings.TrimSpace(input.Description), Protocol: input.Protocol, Status: "active", Version: 1, Endpoint: strings.TrimSpace(input.Endpoint), CreatedAt: time.Now().UTC()}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO tool_catalog (id,code,name,description,protocol,status) VALUES ($1,$2,$3,$4,$5,'active')
@@ -142,7 +102,7 @@ func (s *Service) CreateTool(ctx context.Context, input CreateToolInput) (Tool, 
 }
 
 // ListTools 返回工具目录及各工具最新的有效版本，不返回任何凭据。
-func (s *Service) ListTools(ctx context.Context) ([]Tool, error) {
+func (s *ToolgatewayService) ListTools(ctx context.Context) ([]Tool, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT t.id::text,t.code,t.name,t.description,t.protocol,t.status,v.version,v.endpoint,t.created_at
 		FROM tool_catalog t JOIN LATERAL (
@@ -166,7 +126,7 @@ func (s *Service) ListTools(ctx context.Context) ([]Tool, error) {
 }
 
 // Grant 创建或更新租户对指定工具的授权、智能体版本白名单和单次运行调用上限。
-func (s *Service) Grant(ctx context.Context, toolID string, input GrantInput) error {
+func (s *ToolgatewayService) Grant(ctx context.Context, toolID string, input GrantInput) error {
 	grantID, _ := ids.New()
 	maxCalls := input.MaxCallsPerRun
 	if maxCalls == 0 {
@@ -182,7 +142,7 @@ func (s *Service) Grant(ctx context.Context, toolID string, input GrantInput) er
 }
 
 // IssueTicket 为一次有效运行签发短期、不可篡改的工具调用票据。
-func (s *Service) IssueTicket(ctx context.Context, tenantID, userID, runID, toolCode string) (string, time.Time, error) {
+func (s *ToolgatewayService) IssueTicket(ctx context.Context, tenantID, userID, runID, toolCode string) (string, time.Time, error) {
 	// 授权绑定到具体运行和智能体版本。短有效期降低重放风险，但授权或运行状态可能在签发后变化，
 	// 因此 Invoke 仍会依据数据库重新鉴权。
 	var allowed bool
@@ -211,7 +171,7 @@ func (s *Service) IssueTicket(ctx context.Context, tenantID, userID, runID, tool
 }
 
 // Invoke 校验票据和实时授权后调用 HTTP/MCP 工具，并记录完整调用审计。
-func (s *Service) Invoke(ctx context.Context, ticket string, arguments map[string]any) (map[string]any, error) {
+func (s *ToolgatewayService) Invoke(ctx context.Context, ticket string, arguments map[string]any) (map[string]any, error) {
 	// 租户、用户、运行和工具身份只能来自签名票据；调用方只提供业务参数，
 	// 无法把调用切换到其他租户或记到其他运行名下。
 	claims, err := s.parseTicket(ticket)
@@ -273,7 +233,7 @@ func (s *Service) Invoke(ctx context.Context, ticket string, arguments map[strin
 }
 
 // call 根据协议构造请求，在超时、凭据和响应体大小限制下执行实际远程调用。
-func (s *Service) call(parent context.Context, protocol, endpoint, method string, encrypted []byte, timeoutMS, maxBytes int, toolCode string, arguments map[string]any) (map[string]any, error) {
+func (s *ToolgatewayService) call(parent context.Context, protocol, endpoint, method string, encrypted []byte, timeoutMS, maxBytes int, toolCode string, arguments map[string]any) (map[string]any, error) {
 	body := any(arguments)
 	if protocol == "mcp_http" {
 		// MCP HTTP 使用 JSON-RPC 封装，普通 HTTP 工具直接接收 arguments；两种协议共用安全限制。
@@ -319,7 +279,7 @@ func (s *Service) call(parent context.Context, protocol, endpoint, method string
 }
 
 // parseTicket 验证 HMAC 签名、票据有效期及必要身份字段。
-func (s *Service) parseTicket(value string) (ticketClaims, error) {
+func (s *ToolgatewayService) parseTicket(value string) (ticketClaims, error) {
 	parts := strings.Split(value, ".")
 	if len(parts) != 2 {
 		return ticketClaims{}, ErrInvalidTicket

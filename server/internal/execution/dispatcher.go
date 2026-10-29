@@ -29,7 +29,7 @@ func (d *Dispatcher) DispatchPending(ctx context.Context, limit int) (int, error
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// SKIP LOCKED 允许多个派发器并行消费同一张 Outbox 表，不会因一条繁忙记录相互阻塞。
 	// 队列与数据库没有分布式事务，可靠性由固定 TaskID 和可重试的 pending 记录共同保证。
 	rows, err := tx.Query(ctx, `

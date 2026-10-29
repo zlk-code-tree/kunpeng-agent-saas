@@ -5,19 +5,21 @@ import (
 	"strconv"
 	"time"
 
-	"gin-dify-saas/server/internal/platform/httpx"
-	"gin-dify-saas/server/internal/platform/requestctx"
+	"gin-dify-saas/server/internal/transport/httpx"
+	"gin-dify-saas/server/internal/transport/requestctx"
 
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct{ service *Service }
+type BillingHandler struct{ service *BillingService }
 
-// NewHandler 创建计费接口处理器。
-func NewHandler(service *Service) *Handler { return &Handler{service: service} }
+// NewBillingHandler 创建计费接口处理器。
+func NewBillingHandler(service *BillingService) *BillingHandler {
+	return &BillingHandler{service: service}
+}
 
 // CurrentAccount 返回当前租户对应计费主体的钱包余额。
-func (h *Handler) CurrentAccount(c *gin.Context) {
+func (h *BillingHandler) CurrentAccount(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	item, err := h.service.CurrentAccount(c.Request.Context(), current.TenantID, current.UserID)
 	if errors.Is(err, ErrAccountNotFound) {
@@ -32,7 +34,7 @@ func (h *Handler) CurrentAccount(c *gin.Context) {
 }
 
 // CurrentSubscription 返回当前有效订阅和权益使用量。
-func (h *Handler) CurrentSubscription(c *gin.Context) {
+func (h *BillingHandler) CurrentSubscription(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	item, err := h.service.CurrentSubscription(c.Request.Context(), current.TenantID, current.UserID)
 	if errors.Is(err, ErrAccountNotFound) {
@@ -47,7 +49,7 @@ func (h *Handler) CurrentSubscription(c *gin.Context) {
 }
 
 // Ledger 返回当前计费主体最近的钱包流水。
-func (h *Handler) Ledger(c *gin.Context) {
+func (h *BillingHandler) Ledger(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 	items, err := h.service.ListLedger(c.Request.Context(), current.TenantID, current.UserID, limit)
@@ -59,7 +61,7 @@ func (h *Handler) Ledger(c *gin.Context) {
 }
 
 // Plans 返回当前租户可购买或使用的套餐版本。
-func (h *Handler) Plans(c *gin.Context) {
+func (h *BillingHandler) Plans(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	items, err := h.service.ListPlans(c.Request.Context(), current.TenantID)
 	if err != nil {
@@ -70,7 +72,7 @@ func (h *Handler) Plans(c *gin.Context) {
 }
 
 // Adjust 处理平台管理员人工调账请求。
-func (h *Handler) Adjust(c *gin.Context) {
+func (h *BillingHandler) Adjust(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	var input AdjustmentInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -90,7 +92,7 @@ func (h *Handler) Adjust(c *gin.Context) {
 }
 
 // CostSummary 返回指定时间区间的上游供应商成本汇总。
-func (h *Handler) CostSummary(c *gin.Context) {
+func (h *BillingHandler) CostSummary(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	to := time.Now().UTC()
 	from := to.AddDate(0, -1, 0)
@@ -113,7 +115,7 @@ func (h *Handler) CostSummary(c *gin.Context) {
 }
 
 // Reconcile 执行一次只读账务对账扫描。
-func (h *Handler) Reconcile(c *gin.Context) {
+func (h *BillingHandler) Reconcile(c *gin.Context) {
 	current, _ := requestctx.Get(c)
 	report, err := h.service.Reconcile(c.Request.Context(), current.TenantID)
 	if err != nil {

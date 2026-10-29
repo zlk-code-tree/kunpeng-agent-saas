@@ -3,23 +3,23 @@ package identity
 import (
 	"errors"
 
-	"gin-dify-saas/server/internal/platform/httpx"
-	"gin-dify-saas/server/internal/platform/requestctx"
+	"gin-dify-saas/server/internal/transport/httpx"
+	"gin-dify-saas/server/internal/transport/requestctx"
 
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct {
-	service *Service
+type IdentityHandler struct {
+	service *IdentityService
 }
 
-// NewHandler 创建认证与用户信息接口处理器。
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+// NewIdentityHandler 创建认证与用户信息接口处理器。
+func NewIdentityHandler(service *IdentityService) *IdentityHandler {
+	return &IdentityHandler{service: service}
 }
 
 // Login 处理用户名密码登录请求。
-func (h *Handler) Login(c *gin.Context) {
+func (h *IdentityHandler) Login(c *gin.Context) {
 	var input LoginInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		httpx.Error(c, 400, 14001, "username and password are required")
@@ -38,12 +38,12 @@ func (h *Handler) Login(c *gin.Context) {
 }
 
 // Logout 返回退出成功；当前无状态 JWT 由客户端负责删除。
-func (h *Handler) Logout(c *gin.Context) {
+func (h *IdentityHandler) Logout(c *gin.Context) {
 	httpx.OK(c, map[string]bool{"success": true})
 }
 
 // Codes 返回当前用户的权限码列表供 Vben 前端控制界面访问。
-func (h *Handler) Codes(c *gin.Context) {
+func (h *IdentityHandler) Codes(c *gin.Context) {
 	identity, ok := requestctx.Get(c)
 	if !ok {
 		httpx.Error(c, 401, 14010, "missing identity")
@@ -57,7 +57,7 @@ func (h *Handler) Codes(c *gin.Context) {
 }
 
 // UserInfo 返回当前登录用户资料和角色。
-func (h *Handler) UserInfo(c *gin.Context) {
+func (h *IdentityHandler) UserInfo(c *gin.Context) {
 	identity, ok := requestctx.Get(c)
 	if !ok {
 		httpx.Error(c, 401, 14010, "missing identity")

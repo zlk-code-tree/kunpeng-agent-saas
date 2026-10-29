@@ -7,25 +7,25 @@ import (
 	"mime/multipart"
 	"net/http"
 
-	"gin-dify-saas/server/internal/platform/httpx"
-	"gin-dify-saas/server/internal/platform/requestctx"
+	"gin-dify-saas/server/internal/transport/httpx"
+	"gin-dify-saas/server/internal/transport/requestctx"
 
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct {
-	service *Service
+type KnowledgeHandler struct {
+	service *KnowledgeService
 }
 
 const maxUploadSize = 50 << 20
 
-// NewHandler 创建知识库接口处理器。
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+// NewKnowledgeHandler 创建知识库接口处理器。
+func NewKnowledgeHandler(service *KnowledgeService) *KnowledgeHandler {
+	return &KnowledgeHandler{service: service}
 }
 
 // Upload 校验 multipart 文件、计算摘要并提交知识库上传。
-func (h *Handler) Upload(c *gin.Context) {
+func (h *KnowledgeHandler) Upload(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadSize)
 	header, err := c.FormFile("file")
@@ -57,7 +57,7 @@ func (h *Handler) Upload(c *gin.Context) {
 }
 
 // ListDocuments 返回指定知识库的文档列表。
-func (h *Handler) ListDocuments(c *gin.Context) {
+func (h *KnowledgeHandler) ListDocuments(c *gin.Context) {
 	identity, _ := requestctx.Get(c)
 	items, err := h.service.ListDocuments(c.Request.Context(), identity.TenantID, identity.UserID, c.Param("id"))
 	if err != nil {
@@ -80,7 +80,7 @@ func checksumFile(file multipart.File) (string, error) {
 }
 
 // List 返回当前用户可见的知识库列表。
-func (h *Handler) List(c *gin.Context) {
+func (h *KnowledgeHandler) List(c *gin.Context) {
 	identity, ok := requestctx.Get(c)
 	if !ok {
 		httpx.Error(c, 401, 14010, "missing identity")
@@ -95,13 +95,13 @@ func (h *Handler) List(c *gin.Context) {
 }
 
 // Create 创建私有或租户共享知识库。
-func (h *Handler) Create(c *gin.Context) {
+func (h *KnowledgeHandler) Create(c *gin.Context) {
 	identity, ok := requestctx.Get(c)
 	if !ok {
 		httpx.Error(c, 401, 14010, "missing identity")
 		return
 	}
-	var input CreateInput
+	var input KnowledgeCreateInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		httpx.Error(c, 400, 14201, "invalid knowledge base input")
 		return

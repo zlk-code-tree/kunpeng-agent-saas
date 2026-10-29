@@ -14,27 +14,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Service struct{ db *pgxpool.Pool }
+type OperationsService struct{ db *pgxpool.Pool }
 
-type ExportResult struct {
-	ExportID   string         `json:"exportId"`
-	Checksum   string         `json:"checksumSha256"`
-	Manifest   map[string]any `json:"manifest"`
-	ExportedAt time.Time      `json:"exportedAt"`
-}
-
-// NewService 创建租户数据运维服务。
-func NewService(db *pgxpool.Pool) *Service { return &Service{db: db} }
+// NewOperationsService 创建租户数据运维服务。
+func NewOperationsService(db *pgxpool.Pool) *OperationsService { return &OperationsService{db: db} }
 
 // ExportTenant 在一致性快照中导出经过白名单筛选的租户业务数据并生成校验和。
-func (s *Service) ExportTenant(ctx context.Context, tenantID, actorUserID string) (ExportResult, error) {
+func (s *OperationsService) ExportTenant(ctx context.Context, tenantID, actorUserID string) (ExportResult, error) {
 	// REPEATABLE READ 使各数据分区来自同一租户快照，避免导出中途新增会话导致会话与消息不一致；
 	// 只读事务还能防止导出查询意外修改数据。
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return ExportResult{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	manifest := map[string]any{"formatVersion": 1, "tenantId": tenantID}
 	// 只导出明确批准的业务数据。密码哈希、API Key、集成凭据和邀请令牌等秘密均被排除；
 	// 以后在此增加表必须先评估是否会造成敏感数据披露。

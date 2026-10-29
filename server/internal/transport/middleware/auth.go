@@ -1,11 +1,12 @@
-package identity
+package middleware
 
 import (
 	"errors"
 	"strings"
 
-	"gin-dify-saas/server/internal/platform/httpx"
-	"gin-dify-saas/server/internal/platform/requestctx"
+	"gin-dify-saas/server/internal/platform/security"
+	"gin-dify-saas/server/internal/transport/httpx"
+	"gin-dify-saas/server/internal/transport/requestctx"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -13,7 +14,7 @@ import (
 )
 
 // Middleware 验证访问令牌，并从数据库重新加载当前租户成员关系和平台权限。
-func Middleware(db *pgxpool.Pool, tokens *TokenManager) gin.HandlerFunc {
+func Auth(db *pgxpool.Pool, tokens *security.TokenManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") {
