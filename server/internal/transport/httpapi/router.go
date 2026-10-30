@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"gin-dify-saas/server/internal/administration"
 	"gin-dify-saas/server/internal/agent"
 	"gin-dify-saas/server/internal/billing"
 	"gin-dify-saas/server/internal/execution"
@@ -26,17 +27,18 @@ type Dependencies struct {
 	Metrics      *observability.Metrics
 	Authenticate gin.HandlerFunc
 
-	Installation *installation.InstallationHandler
-	Identity     *identity.IdentityHandler
-	Tenant       *tenant.TenantHandler
-	Billing      *billing.BillingHandler
-	Agent        *agent.AgentHandler
-	Knowledge    *knowledge.KnowledgeHandler
-	Integration  *integration.IntegrationHandler
-	ToolGateway  *toolgateway.ToolgatewayHandler
-	Execution    *execution.ExecutionHandler
-	Operations   *operations.OperationsHandler
-	System       *system.SystemHandler
+	Installation   *installation.InstallationHandler
+	Identity       *identity.IdentityHandler
+	Tenant         *tenant.TenantHandler
+	Billing        *billing.BillingHandler
+	Agent          *agent.AgentHandler
+	Knowledge      *knowledge.KnowledgeHandler
+	Integration    *integration.IntegrationHandler
+	ToolGateway    *toolgateway.ToolgatewayHandler
+	Execution      *execution.ExecutionHandler
+	Operations     *operations.OperationsHandler
+	System         *system.SystemHandler
+	Administration *administration.Handler
 }
 
 // NewRouter 注册公开接口、认证接口和平台管理接口。
@@ -72,6 +74,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	secured.POST("/auth/logout", deps.Identity.Logout)
 	secured.GET("/auth/codes", deps.Identity.Codes)
 	secured.GET("/user/info", deps.Identity.UserInfo)
+	secured.GET("/menu/settings", deps.Administration.Menus)
 	secured.GET("/agents", deps.Agent.List)
 	secured.GET("/billing/account", deps.Billing.CurrentAccount)
 	secured.GET("/billing/plans", deps.Billing.Plans)
@@ -84,6 +87,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	secured.POST("/tenants/:id/invitations", deps.Tenant.Invite)
 	secured.POST("/tenant-invitations/accept", deps.Tenant.AcceptInvitation)
 	secured.DELETE("/tenants/:id/members/:userId", deps.Tenant.RemoveMember)
+	secured.PATCH("/tenants/:id/members/:userId/role", deps.Tenant.UpdateMemberRole)
 	secured.POST("/tenants/:id/leave", deps.Tenant.Leave)
 	secured.POST("/tenants/:id/transfer-ownership", deps.Tenant.TransferOwnership)
 	secured.GET("/knowledge-bases", deps.Knowledge.List)
@@ -99,6 +103,10 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	// 平台管理权限独立于租户 owner/admin，所有安装级操作必须再次验证平台管理员标记。
 	admin := secured.Group("/admin")
 	admin.Use(middleware.RequirePlatformAdmin())
+	admin.GET("/menus", deps.Administration.Menus)
+	admin.PUT("/menus/:routeName", deps.Administration.UpdateMenu)
+	admin.GET("/users", deps.Administration.Users)
+	admin.PATCH("/users/:userId/platform-admin", deps.Administration.SetPlatformAdmin)
 	admin.GET("/dify-instances", deps.Integration.ListInstances)
 	admin.POST("/dify-instances", deps.Integration.CreateInstance)
 	admin.POST("/dify-instances/:id/health-check", deps.Integration.CheckInstance)

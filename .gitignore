@@ -13,4 +13,6 @@ web/apps/*/dist/
 web/apps/*/dist.zip
 
 deploy/data/
+deploy/.env.knowledge.local
+deploy/本地服务账号与端口.md
 

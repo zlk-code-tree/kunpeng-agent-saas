@@ -164,6 +164,24 @@ func (h *TenantHandler) TransferOwnership(c *gin.Context) {
 	httpx.OK(c, map[string]bool{"success": true})
 }
 
+// UpdateMemberRole 仅租户所有者可调整成员角色，且不能通过此接口变更所有者。
+func (h *TenantHandler) UpdateMemberRole(c *gin.Context) {
+	current, _ := requestctx.Get(c)
+	if current.TenantID != c.Param("id") || !hasAnyRole(current.Roles, "owner") {
+		httpx.Error(c, 403, 14603, "only the owner can change member roles")
+		return
+	}
+	var input UpdateMemberRoleInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		httpx.Error(c, 400, 14611, "invalid member role")
+		return
+	}
+	if h.writeError(c, h.service.UpdateMemberRole(c.Request.Context(), current.TenantID, current.UserID, c.Param("userId"), input.Role)) {
+		return
+	}
+	httpx.OK(c, map[string]string{"role": input.Role})
+}
+
 // writeError 将租户领域错误映射为稳定的 HTTP 状态和业务错误码。
 func (h *TenantHandler) writeError(c *gin.Context, err error) bool {
 	if err == nil {

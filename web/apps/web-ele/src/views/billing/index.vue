@@ -91,7 +91,10 @@ onMounted(load);
 
 <template>
   <Page
+    class="saas-page"
+    content-class="saas-page-content"
     description="额度采用预占、结算、释放三段式记账，所有变化均保留不可变流水"
+    header-class="saas-page-header"
     title="套餐与用量"
   >
     <div v-loading="loading" class="grid gap-4 lg:grid-cols-3">

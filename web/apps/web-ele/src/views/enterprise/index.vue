@@ -149,7 +149,10 @@ onMounted(load);
 
 <template>
   <Page
+    class="saas-page"
+    content-class="saas-page-content"
     description="管理企业独立 Dify、本地模型、MCP 工具、成本价格与账务对账"
+    header-class="saas-page-header"
     title="企业集成与成本"
   >
     <template #extra>

@@ -14,3 +14,8 @@ type InviteInput struct {
 	Username string `json:"username" binding:"required,min=3,max=64"`
 	Role     string `json:"role" binding:"required,oneof=admin member finance"`
 }
+
+// UpdateMemberRoleInput 只允许修改普通成员角色；所有者必须走单独的所有权转移流程。
+type UpdateMemberRoleInput struct {
+	Role string `json:"role" binding:"required,oneof=admin member finance"`
+}

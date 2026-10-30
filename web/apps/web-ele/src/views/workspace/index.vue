@@ -211,10 +211,13 @@ onMounted(async () => {
 
 <template>
   <Page
+    class="saas-page"
+    content-class="saas-page-content"
     description="运行任务由 Gin 入队、Worker 调用 Dify，并支持幂等、取消与 SSE 事件接口"
+    header-class="saas-page-header"
     title="智能体工作台"
   >
-    <ElCard class="mx-auto max-w-5xl">
+    <ElCard class="saas-chat-shell mx-auto max-w-5xl">
       <template #header>
         <div class="flex items-center justify-between gap-4">
           <ElSelect
@@ -233,21 +236,21 @@ onMounted(async () => {
           <ElTag effect="plain">Dify</ElTag>
         </div>
       </template>
-      <div class="mb-5 flex min-h-96 flex-col gap-3">
+      <div class="saas-chat-stream flex min-h-96 flex-col gap-3">
         <div
           v-for="(message, index) in messages"
           :key="index"
-          class="max-w-3xl rounded-lg px-4 py-3"
+          class="saas-message"
           :class="
             message.role === 'user'
-              ? 'ml-auto bg-blue-500 text-white'
-              : 'bg-gray-100 text-gray-800'
+              ? 'saas-message--user'
+              : 'saas-message--assistant'
           "
         >
           {{ message.content }}
         </div>
       </div>
-      <div class="flex gap-3">
+      <div class="saas-composer flex gap-3">
         <ElInput
           v-model="prompt"
           :disabled="sending"

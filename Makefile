@@ -1,10 +1,13 @@
 .PHONY: api worker web-install web-dev web-build infra-up infra-down migrate mode-precheck mode-upgrade check lint backup
 
+# 本地开发：server/.env 存在时自动加载；生产环境直接注入环境变量
+LOAD_ENV = set -a; [ -f .env ] && . ./.env; set +a
+
 api:
-	cd server && go run ./cmd/api
+	cd server && $(LOAD_ENV) && go run ./cmd/api
 
 worker:
-	cd server && go run ./cmd/worker
+	cd server && $(LOAD_ENV) && go run ./cmd/worker
 
 web-install:
 	cd web && corepack pnpm install

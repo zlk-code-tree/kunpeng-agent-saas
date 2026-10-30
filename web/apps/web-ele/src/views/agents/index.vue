@@ -34,14 +34,34 @@ onMounted(loadAgents);
 
 <template>
   <Page
+    class="saas-page"
+    content-class="saas-page-content"
     description="选择平台预置智能体，并使用当前空间的参数与知识库"
+    header-class="saas-page-header"
     title="智能体中心"
   >
     <div v-loading="loading" class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-      <ElCard v-for="agent in agents" :key="agent.id" shadow="hover">
+      <ElCard
+        v-for="agent in agents"
+        :key="agent.id"
+        class="saas-agent-card"
+        shadow="hover"
+      >
         <template #header>
           <div class="flex items-center justify-between">
-            <strong>{{ agent.name }}</strong>
+            <div class="flex items-center gap-3">
+              <div
+                class="flex size-10 items-center justify-center rounded-xl bg-indigo-50 text-lg font-bold text-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-300"
+              >
+                {{ agent.name.slice(0, 1) }}
+              </div>
+              <div>
+                <strong class="block">{{ agent.name }}</strong>
+                <span class="mt-1 block text-xs text-gray-400">{{
+                  agent.category || '通用智能体'
+                }}</span>
+              </div>
+            </div>
             <ElTag effect="plain">v{{ agent.version }}</ElTag>
           </div>
         </template>
@@ -49,6 +69,7 @@ onMounted(loadAgents);
           {{ agent.description || '暂无介绍' }}
         </p>
         <ElButton
+          class="w-full"
           :disabled="!agent.enabled || !agent.configured"
           type="primary"
           @click="startChat(agent)"

@@ -214,6 +214,51 @@ func (s *TenantService) Members(ctx context.Context, tenantID string) ([]Member,
 	return items, rows.Err()
 }
 
+// UpdateMemberRole 由租户所有者调整普通成员角色，立即影响下一次请求的数据库鉴权。
+// owner 不在可写角色中，防止绕过 TransferOwnership 的原子所有权转移。
+func (s *TenantService) UpdateMemberRole(ctx context.Context, tenantID, actorID, targetID, role string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var actorRole, targetRole string
+	if err := tx.QueryRow(ctx, `
+		SELECT role FROM tenant_members WHERE tenant_id=$1 AND user_id=$2 AND status='active'
+	`, tenantID, actorID).Scan(&actorRole); err != nil {
+		return ErrForbidden
+	}
+	if actorRole != "owner" {
+		return ErrForbidden
+	}
+	err = tx.QueryRow(ctx, `
+		SELECT role FROM tenant_members WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR UPDATE
+	`, tenantID, targetID).Scan(&targetRole)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrTenantNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if targetRole == "owner" {
+		return ErrOwnerMustTransfer
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE tenant_members SET role=$3,updated_at=NOW()
+		WHERE tenant_id=$1 AND user_id=$2
+	`, tenantID, targetID, role); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (id,tenant_id,actor_user_id,action,resource_type,resource_id,metadata)
+		VALUES (gen_random_uuid(),$1,$2,'tenant.member.role.update','tenant_member',$3,
+		        jsonb_build_object('oldRole',$4,'newRole',$5))
+	`, tenantID, actorID, targetID, targetRole, role); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // Invite 为已注册用户创建限时租户邀请，并返回仅展示一次的原始令牌。
 func (s *TenantService) Invite(ctx context.Context, tenantID, actorUserID string, input InviteInput) (Invitation, error) {
 	var targetUserID, username string

@@ -67,7 +67,10 @@ onMounted(load);
 
 <template>
   <Page
+    class="saas-page"
+    content-class="saas-page-content"
     description="个人资料默认私有；多租户模式可显式共享到当前租户"
+    header-class="saas-page-header"
     title="私有知识库"
   >
     <template #extra>
@@ -76,10 +79,22 @@ onMounted(load);
       >
     </template>
     <div v-loading="loading" class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-      <ElCard v-for="item in items" :key="item.id" shadow="hover">
+      <ElCard
+        v-for="item in items"
+        :key="item.id"
+        class="saas-knowledge-card"
+        shadow="hover"
+      >
         <template #header>
           <div class="flex items-center justify-between">
-            <strong>{{ item.name }}</strong>
+            <div class="flex items-center gap-3">
+              <div
+                class="flex size-10 items-center justify-center rounded-xl bg-cyan-50 text-lg font-bold text-cyan-600 dark:bg-cyan-950/50 dark:text-cyan-300"
+              >
+                {{ item.name.slice(0, 1) }}
+              </div>
+              <strong>{{ item.name }}</strong>
+            </div>
             <ElTag>{{
               item.visibility === 'private' ? '私有' : '租户共享'
             }}</ElTag>
@@ -91,7 +106,7 @@ onMounted(load);
           :http-request="(options) => upload(item.id, options.file)"
           :show-file-list="false"
         >
-          <ElButton>上传文档</ElButton>
+          <ElButton class="w-full">上传文档</ElButton>
         </ElUpload>
       </ElCard>
     </div>

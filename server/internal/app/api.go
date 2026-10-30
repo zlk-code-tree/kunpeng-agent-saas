@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"gin-dify-saas/server/internal/administration"
 	"gin-dify-saas/server/internal/agent"
 	"gin-dify-saas/server/internal/billing"
 	"gin-dify-saas/server/internal/config"
@@ -78,9 +79,10 @@ func NewAPI(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*AP
 		ToolGateway: toolgateway.NewToolgatewayHandler(toolgateway.NewToolgatewayService(
 			db, credentialBox, cfg.JWT.Secret, cfg.Environment != "production",
 		)),
-		Execution:  execution.NewExecutionHandler(execution.NewExecutionService(db, queue, billingPort)),
-		Operations: operations.NewOperationsHandler(operations.NewOperationsService(db)),
-		System:     system.NewSystemHandler(installationService, db, redisClient),
+		Execution:      execution.NewExecutionHandler(execution.NewExecutionService(db, queue, billingPort)),
+		Operations:     operations.NewOperationsHandler(operations.NewOperationsService(db)),
+		System:         system.NewSystemHandler(installationService, db, redisClient),
+		Administration: administration.NewHandler(administration.NewService(db)),
 	})
 
 	return &API{handler: router, queue: queue}, nil

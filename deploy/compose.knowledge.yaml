@@ -1,0 +1,67 @@
+services:
+  vectorstore:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: knowledge
+      POSTGRES_USER: knowledge
+      POSTGRES_PASSWORD: ${KNOWLEDGE_DB_PASSWORD:?KNOWLEDGE_DB_PASSWORD is required}
+    volumes:
+      - knowledge_vector_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knowledge -d knowledge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  embedder:
+    build:
+      context: ./embedding
+    restart: unless-stopped
+    volumes:
+      - knowledge_model_data:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  knowledge-gateway:
+    build:
+      context: ../server
+      dockerfile: Dockerfile.knowledge
+    restart: unless-stopped
+    environment:
+      KNOWLEDGE_DATABASE_URL: postgres://knowledge:${KNOWLEDGE_DB_PASSWORD:?KNOWLEDGE_DB_PASSWORD is required}@vectorstore:5432/knowledge?sslmode=disable
+      KNOWLEDGE_API_KEY: ${KNOWLEDGE_API_KEY:?KNOWLEDGE_API_KEY is required}
+      KNOWLEDGE_ID: docker-deployment
+      EMBEDDING_URL: http://embedder:8000
+      KNOWLEDGE_HTTP_ADDR: :8080
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ../knowledge/docker-deployment:/knowledge/docker-deployment:ro
+      - ${DOCKER_TOOLKIT_PATH:-/Users/zhanglikun/workspace/service/docker}:/knowledge/docker-toolkit:ro
+    depends_on:
+      vectorstore:
+        condition: service_healthy
+      embedder:
+        condition: service_healthy
+    networks:
+      - default
+      - dify
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+networks:
+  dify:
+    external: true
+    name: dify_default
+
+volumes:
+  knowledge_vector_data:
+  knowledge_model_data:

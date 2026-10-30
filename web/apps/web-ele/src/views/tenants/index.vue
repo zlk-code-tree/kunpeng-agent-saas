@@ -146,7 +146,10 @@ onMounted(load);
 
 <template>
   <Page
+    class="saas-page"
+    content-class="saas-page-content"
     description="个人空间与企业空间使用相同的租户隔离模型；切换空间会签发新的租户身份令牌"
+    header-class="saas-page-header"
     title="空间与成员"
   >
     <template #extra>
