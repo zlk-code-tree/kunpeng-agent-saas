@@ -50,9 +50,6 @@ const invitationToken = ref('');
 const currentTenant = computed(() =>
   tenants.value.find((item) => item.current),
 );
-const canManage = computed(() =>
-  ['owner', 'admin'].includes(currentTenant.value?.role || ''),
-);
 
 /** 加载租户列表，并仅加载当前租户的成员。 */
 async function load() {
@@ -155,7 +152,10 @@ onMounted(load);
     <template #extra>
       <div class="flex gap-2">
         <ElButton @click="acceptVisible = true">接受邀请</ElButton>
-        <ElButton type="primary" @click="createVisible = true"
+        <ElButton
+          v-access:code="'tenant:settings'"
+          type="primary"
+          @click="createVisible = true"
           >创建企业空间</ElButton
         >
       </div>
@@ -198,7 +198,7 @@ onMounted(load);
         <div class="flex items-center justify-between">
           <strong>{{ currentTenant.name }} 成员</strong>
           <ElButton
-            v-if="canManage"
+            v-access:code="'member:invite'"
             type="primary"
             @click="inviteVisible = true"
             >邀请成员</ElButton
@@ -217,10 +217,15 @@ onMounted(load);
             new Date(row.joinedAt).toLocaleString()
           }}</template>
         </ElTableColumn>
-        <ElTableColumn v-if="canManage" label="操作" width="220">
+        <ElTableColumn
+          v-access:code="['member:remove', 'member:role-assign']"
+          label="操作"
+          width="220"
+        >
           <template #default="{ row }">
             <ElButton
               v-if="currentTenant?.role === 'owner' && row.role !== 'owner'"
+              v-access:code="'member:role-assign'"
               link
               type="primary"
               @click="transferOwnership(row)"
@@ -231,6 +236,7 @@ onMounted(load);
                 row.role !== 'owner' &&
                 row.userId !== userStore.userInfo?.userId
               "
+              v-access:code="'member:remove'"
               link
               type="danger"
               @click="removeMember(row)"

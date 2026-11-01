@@ -74,7 +74,10 @@ onMounted(load);
     title="私有知识库"
   >
     <template #extra>
-      <ElButton type="primary" @click="dialogVisible = true"
+      <ElButton
+        v-access:code="'knowledge:create'"
+        type="primary"
+        @click="dialogVisible = true"
         >新建知识库</ElButton
       >
     </template>
@@ -106,7 +109,9 @@ onMounted(load);
           :http-request="(options) => upload(item.id, options.file)"
           :show-file-list="false"
         >
-          <ElButton class="w-full">上传文档</ElButton>
+          <ElButton v-access:code="'knowledge:upload'" class="w-full"
+            >上传文档</ElButton
+          >
         </ElUpload>
       </ElCard>
     </div>

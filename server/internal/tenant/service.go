@@ -24,6 +24,7 @@ var (
 	ErrConflict          = errors.New("resource already exists")
 	ErrForbidden         = errors.New("tenant operation is forbidden")
 	ErrInvitation        = errors.New("invitation is invalid or expired")
+	ErrInvalidRole       = errors.New("invitation role is invalid")
 	ErrMultiModeOnly     = errors.New("operation requires multi-tenant mode")
 	ErrTenantNotFound    = errors.New("tenant resource not found")
 	ErrOwnerMustTransfer = errors.New("tenant owner must transfer ownership before leaving")
@@ -90,6 +91,9 @@ func (s *TenantService) Register(ctx context.Context, input RegisterInput) (Regi
 	`, membershipID, tenantID, userID); err != nil {
 		return RegisterResult{}, err
 	}
+	if err := syncBuiltinMemberRole(ctx, tx, tenantID, userID, "owner"); err != nil {
+		return RegisterResult{}, err
+	}
 	if err := s.accounts.ProvisionAccount(ctx, tx, tenantID, "user", userID); err != nil {
 		return RegisterResult{}, err
 	}
@@ -152,6 +156,9 @@ func (s *TenantService) Create(ctx context.Context, userID string, input TenantC
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO tenant_members (id, tenant_id, user_id, role, status) VALUES ($1,$2,$3,'owner','active')
 	`, membershipID, tenantID, userID); err != nil {
+		return TenantItem{}, err
+	}
+	if err := syncBuiltinMemberRole(ctx, tx, tenantID, userID, "owner"); err != nil {
 		return TenantItem{}, err
 	}
 	if err := s.accounts.ProvisionAccount(ctx, tx, tenantID, "tenant", tenantID); err != nil {
@@ -249,6 +256,9 @@ func (s *TenantService) UpdateMemberRole(ctx context.Context, tenantID, actorID,
 	`, tenantID, targetID, role); err != nil {
 		return err
 	}
+	if err := syncBuiltinMemberRole(ctx, tx, tenantID, targetID, role); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (id,tenant_id,actor_user_id,action,resource_type,resource_id,metadata)
 		VALUES (gen_random_uuid(),$1,$2,'tenant.member.role.update','tenant_member',$3,
@@ -283,12 +293,26 @@ func (s *TenantService) Invite(ctx context.Context, tenantID, actorUserID string
 	if err != nil {
 		return Invitation{}, err
 	}
+	// 可选的自定义角色必须属于当前租户或内置共享角色（scope 隔离）。
+	var roleID any
+	if input.RoleID != "" {
+		var valid bool
+		if err := s.db.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM roles WHERE id=$1 AND scope='tenant' AND (tenant_id IS NULL OR tenant_id=$2))
+		`, input.RoleID, tenantID).Scan(&valid); err != nil {
+			return Invitation{}, err
+		}
+		if !valid {
+			return Invitation{}, ErrInvalidRole
+		}
+		roleID = input.RoleID
+	}
 	id, _ := ids.New()
 	expiresAt := time.Now().UTC().Add(72 * time.Hour)
 	_, err = s.db.Exec(ctx, `
-		INSERT INTO tenant_invitations (id, tenant_id, invitee_user_id, invited_by, role, token_hash, expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
-	`, id, tenantID, targetUserID, actorUserID, input.Role, tokenHash, expiresAt)
+		INSERT INTO tenant_invitations (id, tenant_id, invitee_user_id, invited_by, role, role_id, token_hash, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	`, id, tenantID, targetUserID, actorUserID, input.Role, roleID, tokenHash, expiresAt)
 	if err != nil {
 		return Invitation{}, classifyConflict(err)
 	}
@@ -304,14 +328,15 @@ func (s *TenantService) AcceptInvitation(ctx context.Context, userID, token stri
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var invitationID, tenantID, role string
+	var extraRoleID *string
 	var expiresAt time.Time
 	// 锁定待处理邀请，防止并发请求重复接受；成员关系使用 Upsert，支持重新邀请已退出用户。
 	err = tx.QueryRow(ctx, `
-		SELECT id::text, tenant_id::text, role, expires_at
+		SELECT id::text, tenant_id::text, role, role_id::text, expires_at
 		FROM tenant_invitations
 		WHERE token_hash=$1 AND invitee_user_id=$2 AND status='pending'
 		FOR UPDATE
-	`, tokenHash, userID).Scan(&invitationID, &tenantID, &role, &expiresAt)
+	`, tokenHash, userID).Scan(&invitationID, &tenantID, &role, &extraRoleID, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TenantItem{}, ErrInvitation
 	}
@@ -329,6 +354,17 @@ func (s *TenantService) AcceptInvitation(ctx context.Context, userID, token stri
 		ON CONFLICT (tenant_id, user_id) DO UPDATE SET role=EXCLUDED.role, status='active', updated_at=NOW()
 	`, membershipID, tenantID, userID, role); err != nil {
 		return TenantItem{}, err
+	}
+	if err := syncBuiltinMemberRole(ctx, tx, tenantID, userID, role); err != nil {
+		return TenantItem{}, err
+	}
+	if extraRoleID != nil && *extraRoleID != "" {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO member_roles (tenant_id, user_id, role_id) VALUES ($1,$2,$3)
+			ON CONFLICT DO NOTHING
+		`, tenantID, userID, *extraRoleID); err != nil {
+			return TenantItem{}, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE tenant_invitations SET status='accepted', accepted_at=NOW(), updated_at=NOW() WHERE id=$1`, invitationID); err != nil {
 		return TenantItem{}, err
@@ -358,14 +394,23 @@ func (s *TenantService) RemoveMember(ctx context.Context, tenantID, actorUserID,
 	if targetRole == "owner" || actorRole == "admin" && targetRole == "admin" {
 		return ErrForbidden
 	}
-	result, err := s.db.Exec(ctx, `UPDATE tenant_members SET status='removed', updated_at=NOW() WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, tenantID, targetUserID)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := tx.Exec(ctx, `UPDATE tenant_members SET status='removed', updated_at=NOW() WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, tenantID, targetUserID)
 	if err != nil {
 		return err
 	}
 	if result.RowsAffected() == 0 {
 		return ErrTenantNotFound
 	}
-	return nil
+	// 同时清理角色绑定，防止成员被重新邀请时旧的附加角色残留生效。
+	if _, err := tx.Exec(ctx, `DELETE FROM member_roles WHERE tenant_id=$1 AND user_id=$2`, tenantID, targetUserID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Leave 让普通成员退出租户；所有者必须先完成所有权转移。
@@ -379,8 +424,18 @@ func (s *TenantService) Leave(ctx context.Context, tenantID, userID string) erro
 	if role == "owner" {
 		return ErrOwnerMustTransfer
 	}
-	_, err := s.db.Exec(ctx, `UPDATE tenant_members SET status='left', updated_at=NOW() WHERE tenant_id=$1 AND user_id=$2`, tenantID, userID)
-	return err
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `UPDATE tenant_members SET status='left', updated_at=NOW() WHERE tenant_id=$1 AND user_id=$2`, tenantID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM member_roles WHERE tenant_id=$1 AND user_id=$2`, tenantID, userID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // TransferOwnership 原子地把租户所有权从当前所有者转移给目标成员。
@@ -406,7 +461,13 @@ func (s *TenantService) TransferOwnership(ctx context.Context, tenantID, ownerUs
 	if _, err := tx.Exec(ctx, `UPDATE tenant_members SET role='admin', updated_at=NOW() WHERE tenant_id=$1 AND user_id=$2 AND role='owner'`, tenantID, ownerUserID); err != nil {
 		return err
 	}
+	if err := syncBuiltinMemberRole(ctx, tx, tenantID, ownerUserID, "admin"); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE tenant_members SET role='owner', updated_at=NOW() WHERE tenant_id=$1 AND user_id=$2`, tenantID, targetUserID); err != nil {
+		return err
+	}
+	if err := syncBuiltinMemberRole(ctx, tx, tenantID, targetUserID, "owner"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -422,6 +483,23 @@ func (s *TenantService) ensureInstalledMulti(ctx context.Context) error {
 		return ErrMultiModeOnly
 	}
 	return nil
+}
+
+// syncBuiltinMemberRole 在调用方事务内把成员的内置角色同步到 member_roles 绑定，
+// 保持 tenant_members.role 与 RBAC 角色绑定一致；自定义角色绑定不受影响。
+func syncBuiltinMemberRole(ctx context.Context, tx pgx.Tx, tenantID, userID, role string) error {
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM member_roles mr USING roles r
+		WHERE mr.tenant_id=$1 AND mr.user_id=$2 AND mr.role_id=r.id AND r.tenant_id IS NULL AND r.scope='tenant'
+	`, tenantID, userID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO member_roles (tenant_id, user_id, role_id)
+		SELECT $1, $2, id FROM roles WHERE code=$3 AND scope='tenant' AND tenant_id IS NULL
+		ON CONFLICT DO NOTHING
+	`, tenantID, userID, role)
+	return err
 }
 
 // insertAudit 在调用方事务内写入租户操作审计，保证审计与业务变更同时提交。

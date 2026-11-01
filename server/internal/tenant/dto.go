@@ -13,6 +13,8 @@ type RegisterInput struct {
 type InviteInput struct {
 	Username string `json:"username" binding:"required,min=3,max=64"`
 	Role     string `json:"role" binding:"required,oneof=admin member finance"`
+	// RoleID 可选，指定接受邀请后附带的自定义角色（内置角色由 Role 表达）。
+	RoleID string `json:"roleId" binding:"omitempty,uuid"`
 }
 
 // UpdateMemberRoleInput 只允许修改普通成员角色；所有者必须走单独的所有权转移流程。

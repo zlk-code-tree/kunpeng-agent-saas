@@ -192,6 +192,8 @@ func (h *TenantHandler) writeError(c *gin.Context, err error) bool {
 		httpx.Error(c, 409, 14609, err.Error())
 	case errors.Is(err, ErrConflict):
 		httpx.Error(c, 409, 14610, err.Error())
+	case errors.Is(err, ErrInvalidRole):
+		httpx.Error(c, 400, 14612, err.Error())
 	case errors.Is(err, ErrTenantNotFound), errors.Is(err, ErrInvitation):
 		httpx.Error(c, 404, 14604, err.Error())
 	case errors.Is(err, ErrForbidden), errors.Is(err, ErrOwnerMustTransfer):

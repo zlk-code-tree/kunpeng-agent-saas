@@ -95,9 +95,15 @@ function setupAccessGuard(router: Router) {
     const userInfo = userStore.userInfo || (await authStore.fetchUserInfo());
     const userRoles = userInfo.roles ?? [];
 
+    // 菜单过滤以权限码为准（与按钮 v-access:code、接口放行同源）；
+    // /auth/codes 同时包含角色名，合并角色名兜底按角色配置的菜单。
+    const accessCodes = [
+      ...new Set([...(accessStore.accessCodes ?? []), ...userRoles]),
+    ];
+
     // 生成菜单和路由
     const { accessibleMenus, accessibleRoutes } = await generateAccess({
-      roles: userRoles,
+      roles: accessCodes,
       router,
       // 则会在菜单中显示，但是访问会被重定向到403
       routes: accessRoutes,

@@ -21,6 +21,7 @@ import (
 	"gin-dify-saas/server/internal/platform/observability"
 	"gin-dify-saas/server/internal/platform/secretbox"
 	"gin-dify-saas/server/internal/platform/security"
+	"gin-dify-saas/server/internal/rbac"
 	"gin-dify-saas/server/internal/system"
 	"gin-dify-saas/server/internal/tenant"
 	"gin-dify-saas/server/internal/toolgateway"
@@ -83,6 +84,7 @@ func NewAPI(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) (*AP
 		Operations:     operations.NewOperationsHandler(operations.NewOperationsService(db)),
 		System:         system.NewSystemHandler(installationService, db, redisClient),
 		Administration: administration.NewHandler(administration.NewService(db)),
+		RBAC:           rbac.NewHandler(rbac.NewService(db)),
 	})
 
 	return &API{handler: router, queue: queue}, nil

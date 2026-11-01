@@ -6,6 +6,7 @@ const routes: RouteRecordRaw[] = [
     path: '/knowledge',
     component: () => import('#/views/knowledge/index.vue'),
     meta: {
+      authority: ['knowledge:view'],
       icon: 'lucide:library-big',
       order: 20,
       title: '私有知识库',

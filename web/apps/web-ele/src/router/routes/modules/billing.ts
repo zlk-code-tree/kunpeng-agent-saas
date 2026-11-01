@@ -6,6 +6,7 @@ const routes: RouteRecordRaw[] = [
     path: '/billing',
     component: () => import('#/views/billing/index.vue'),
     meta: {
+      authority: ['billing:view'],
       icon: 'lucide:wallet-cards',
       order: 10,
       title: '套餐与用量',

@@ -69,6 +69,7 @@ onMounted(loadAgents);
           {{ agent.description || '暂无介绍' }}
         </p>
         <ElButton
+          v-access:code="'agent:run'"
           class="w-full"
           :disabled="!agent.enabled || !agent.configured"
           type="primary"

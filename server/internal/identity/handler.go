@@ -42,16 +42,24 @@ func (h *IdentityHandler) Logout(c *gin.Context) {
 	httpx.OK(c, map[string]bool{"success": true})
 }
 
-// Codes 返回当前用户的权限码列表供 Vben 前端控制界面访问。
+// Codes 返回当前用户的权限码与角色名列表供 Vben 前端控制按钮与菜单显隐。
+// 权限码由认证中间件实时计算，与接口放行使用同一来源；角色名用于兼容按角色配置的菜单。
 func (h *IdentityHandler) Codes(c *gin.Context) {
 	identity, ok := requestctx.Get(c)
 	if !ok {
 		httpx.Error(c, 401, 14010, "missing identity")
 		return
 	}
-	codes := []string{"agent:use", "knowledge:manage"}
-	if identity.PlatformAdmin {
-		codes = append(codes, "platform:manage")
+	seen := make(map[string]bool, len(identity.PermissionCodes)+len(identity.Roles))
+	codes := make([]string, 0, len(identity.PermissionCodes)+len(identity.Roles))
+	for _, group := range [][]string{identity.PermissionCodes, identity.Roles} {
+		for _, code := range group {
+			if code == "" || seen[code] {
+				continue
+			}
+			seen[code] = true
+			codes = append(codes, code)
+		}
 	}
 	httpx.OK(c, codes)
 }

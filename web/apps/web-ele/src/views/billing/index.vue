@@ -70,17 +70,16 @@ function entitlementPercent(used: string, limit: string) {
   return Math.min(100, Math.round((Number(used) / maximum) * 100));
 }
 
-/** 并行加载计费首页所需的账户、订阅、套餐和流水。 */
+/** 并行加载计费首页所需的账户、订阅、套餐；流水按权限单独加载，失败不影响整页。 */
 async function load() {
   loading.value = true;
   try {
-    [account.value, subscription.value, plans.value, ledger.value] =
-      await Promise.all([
-        getBillingAccountApi(),
-        getBillingSubscriptionApi(),
-        listBillingPlansApi(),
-        listBillingLedgerApi(),
-      ]);
+    [account.value, subscription.value, plans.value] = await Promise.all([
+      getBillingAccountApi(),
+      getBillingSubscriptionApi(),
+      listBillingPlansApi(),
+    ]);
+    ledger.value = await listBillingLedgerApi().catch(() => []);
   } finally {
     loading.value = false;
   }
@@ -183,7 +182,12 @@ onMounted(load);
       </ElCard>
     </div>
 
-    <ElCard class="mt-5" header="额度流水" shadow="never">
+    <ElCard
+      v-access:code="'billing:ledger-view'"
+      class="mt-5"
+      header="额度流水"
+      shadow="never"
+    >
       <ElTable :data="ledger">
         <ElTableColumn label="时间" width="190">
           <template #default="{ row }">{{
