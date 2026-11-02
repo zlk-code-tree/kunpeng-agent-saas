@@ -12,17 +12,6 @@ const routes: RouteRecordRaw[] = [
       title: '空间与成员',
     },
   },
-  {
-    name: 'RoleManagement',
-    path: '/tenants/roles',
-    component: () => import('#/views/tenants/roles.vue'),
-    meta: {
-      authority: ['role:manage'],
-      icon: 'lucide:key-round',
-      order: 6,
-      title: '角色管理',
-    },
-  },
 ];
 
 export default routes;

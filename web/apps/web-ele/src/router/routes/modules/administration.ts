@@ -4,9 +4,10 @@ const routes: RouteRecordRaw[] = [
   {
     name: 'SystemManagement',
     path: '/system-management',
-    redirect: '/system',
     meta: {
-      authority: ['platform_admin'],
+      // 系统管理作为统一导航分组：平台管理员与租户角色管理员均可进入，
+      // 具体页面仍由各子路由的权限码独立过滤。
+      authority: ['platform_admin', 'role:manage'],
       icon: 'lucide:settings-2',
       order: 30,
       title: '系统管理',
@@ -30,6 +31,16 @@ const routes: RouteRecordRaw[] = [
           authority: ['user:manage'],
           icon: 'lucide:users-round',
           title: '用户管理',
+        },
+      },
+      {
+        name: 'RoleManagement',
+        path: '/tenants/roles',
+        component: () => import('#/views/tenants/roles.vue'),
+        meta: {
+          authority: ['role:manage'],
+          icon: 'lucide:key-round',
+          title: '角色管理',
         },
       },
       {
